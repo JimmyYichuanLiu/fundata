@@ -36,6 +36,19 @@ def init_database(db_path):
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
+    # 邮件来源表（须在 fund_nav_data 之前创建，以便外键引用）
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS email_sources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            邮件主题 TEXT,
+            邮件发件人 TEXT,
+            邮件日期 TEXT,
+            附件文件名 TEXT,
+            sheet名称 TEXT,
+            记录时间 DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
     # 基金净值数据表
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS fund_nav_data (
@@ -46,9 +59,17 @@ def init_database(db_path):
             单位净值 REAL NOT NULL,
             累计单位净值 REAL,
             插入时间 DATETIME DEFAULT CURRENT_TIMESTAMP,
+            source_id INTEGER REFERENCES email_sources(id),
             UNIQUE(产品代码, 净值日期)
         )
     ''')
+
+    # 迁移：为已有数据库添加 source_id 列
+    try:
+        cursor.execute('ALTER TABLE fund_nav_data ADD COLUMN source_id INTEGER REFERENCES email_sources(id)')
+        conn.commit()
+    except Exception:
+        pass  # 列已存在则忽略
 
     # 创建索引以提高查询性能
     cursor.execute('''
@@ -114,6 +135,17 @@ def save_sync_state(conn, last_uid, uidvalidity):
         ('uidvalidity', str(uidvalidity))
     )
     conn.commit()
+
+
+def insert_email_source(conn, email_subject, email_sender, email_date, filename, sheet_name):
+    """插入邮件来源记录，返回 source_id"""
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO email_sources (邮件主题, 邮件发件人, 邮件日期, 附件文件名, sheet名称)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (email_subject, email_sender, email_date, filename, sheet_name))
+    conn.commit()
+    return cursor.lastrowid
 
 
 def log_extraction_failure(conn, email_subject, email_sender, email_date,
@@ -279,13 +311,14 @@ def extract_excel_attachments(msg, failed_extractions):
     return dataframes, has_excel
 
 
-def insert_data_to_db(conn, df, failed_inserts):
+def insert_data_to_db(conn, df, failed_inserts, source_id=None):
     """将DataFrame数据插入数据库（仅插入核心字段）
 
     Args:
         conn: 数据库连接
         df: 要插入的数据框
         failed_inserts: 失败记录列表
+        source_id: 对应的 email_sources 表主键（可选）
 
     Returns:
         inserted_count: 插入成功的数量
@@ -320,14 +353,15 @@ def insert_data_to_db(conn, df, failed_inserts):
 
             cursor.execute('''
                 INSERT OR IGNORE INTO fund_nav_data
-                (产品名称, 产品代码, 净值日期, 单位净值, 累计单位净值)
-                VALUES (?, ?, ?, ?, ?)
+                (产品名称, 产品代码, 净值日期, 单位净值, 累计单位净值, source_id)
+                VALUES (?, ?, ?, ?, ?, ?)
             ''', (
                 row.get('产品名称'),
                 row.get('产品代码'),
                 row.get('净值日期'),
                 row.get('单位净值'),
-                row.get('累计单位净值')
+                row.get('累计单位净值'),
+                source_id
             ))
 
             if cursor.rowcount > 0:
@@ -726,7 +760,11 @@ def connect_and_fetch_email(email_user, email_pwd, db_path):
                     for df_info in dataframes:
                         df = df_info['data']
                         email_failed_inserts = []
-                        inserted, skipped = insert_data_to_db(conn, df, email_failed_inserts)
+                        source_id = insert_email_source(
+                            conn, subject, sender, date_header,
+                            df_info['filename'], df_info['sheet_name']
+                        )
+                        inserted, skipped = insert_data_to_db(conn, df, email_failed_inserts, source_id)
                         total_data_inserted += inserted
 
                         # 记录插入失败的记录（排除重复数据）
