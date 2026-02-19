@@ -1,0 +1,21 @@
+# 环境变量（含邮箱密码，不上传）
+.env
+
+# SQLite 数据库文件（含实际数据，不上传）
+*.db
+
+# 邮件附件目录（含敏感金融数据）
+email_attachments/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 临时文件
+nul
+*.txt.bak
+
+# IDE
+.idea/
+.vscode/
