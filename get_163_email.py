@@ -49,10 +49,21 @@ def init_database(db_path):
         )
     ''')
 
+    # 基金主表：每个产品代码对应唯一 fund_id，按首次录入时间自增
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS funds (
+            fund_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            产品代码 TEXT NOT NULL UNIQUE,
+            产品名称 TEXT,
+            首次录入时间 DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
     # 基金净值数据表
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS fund_nav_data (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fund_id INTEGER REFERENCES funds(fund_id),
             产品名称 TEXT,
             产品代码 TEXT NOT NULL,
             净值日期 TEXT NOT NULL,
@@ -71,6 +82,34 @@ def init_database(db_path):
     except Exception:
         pass  # 列已存在则忽略
 
+    # 迁移：为已有数据库添加 fund_id 列
+    try:
+        cursor.execute('ALTER TABLE fund_nav_data ADD COLUMN fund_id INTEGER REFERENCES funds(fund_id)')
+        conn.commit()
+    except Exception:
+        pass  # 列已存在则忽略
+
+    # 迁移：从现有 fund_nav_data 填充 funds 表（按首次插入时间排序，保证 fund_id 连续递增）
+    cursor.execute('SELECT COUNT(*) FROM funds')
+    if cursor.fetchone()[0] == 0:
+        cursor.execute('''
+            INSERT OR IGNORE INTO funds (产品代码, 产品名称, 首次录入时间)
+            SELECT 产品代码, MIN(产品名称), MIN(插入时间)
+            FROM fund_nav_data
+            WHERE 产品代码 IS NOT NULL
+            GROUP BY 产品代码
+            ORDER BY MIN(插入时间)
+        ''')
+        conn.commit()
+
+    # 迁移：回填 fund_nav_data 中 fund_id 为 NULL 的已有记录
+    cursor.execute('''
+        UPDATE fund_nav_data
+        SET fund_id = (SELECT fund_id FROM funds WHERE funds.产品代码 = fund_nav_data.产品代码)
+        WHERE fund_id IS NULL AND 产品代码 IS NOT NULL
+    ''')
+    conn.commit()
+
     # 创建索引以提高查询性能
     cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_product_code
@@ -80,6 +119,11 @@ def init_database(db_path):
     cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_nav_date
         ON fund_nav_data(净值日期)
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_fund_id
+        ON fund_nav_data(fund_id)
     ''')
 
     # 增量同步状态表：记录上次处理到的最大UID和UIDVALIDITY
@@ -135,6 +179,21 @@ def save_sync_state(conn, last_uid, uidvalidity):
         ('uidvalidity', str(uidvalidity))
     )
     conn.commit()
+
+
+def get_or_create_fund_id(conn, product_code, product_name=None):
+    """获取或创建基金的 fund_id（基于产品代码全局唯一，按首次录入时间自增）"""
+    cursor = conn.cursor()
+    cursor.execute('SELECT fund_id FROM funds WHERE 产品代码 = ?', (product_code,))
+    row = cursor.fetchone()
+    if row:
+        return row[0]
+    cursor.execute(
+        'INSERT INTO funds (产品代码, 产品名称) VALUES (?, ?)',
+        (product_code, product_name)
+    )
+    conn.commit()
+    return cursor.lastrowid
 
 
 def insert_email_source(conn, email_subject, email_sender, email_date, filename, sheet_name):
@@ -351,11 +410,15 @@ def insert_data_to_db(conn, df, failed_inserts, source_id=None):
                 skipped_count += 1
                 continue
 
+            # 获取或创建该产品的 fund_id（优先用于唯一标识基金）
+            fund_id = get_or_create_fund_id(conn, row.get('产品代码'), row.get('产品名称'))
+
             cursor.execute('''
                 INSERT OR IGNORE INTO fund_nav_data
-                (产品名称, 产品代码, 净值日期, 单位净值, 累计单位净值, source_id)
-                VALUES (?, ?, ?, ?, ?, ?)
+                (fund_id, 产品名称, 产品代码, 净值日期, 单位净值, 累计单位净值, source_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             ''', (
+                fund_id,
                 row.get('产品名称'),
                 row.get('产品代码'),
                 row.get('净值日期'),
@@ -482,47 +545,36 @@ def print_failure_report(failed_extractions, failed_inserts):
 
 
 def query_and_display_data(conn):
-    """查询并显示数据库统计信息"""
+    """查询并显示数据库统计信息（以 fund_id 为主键排序）"""
     cursor = conn.cursor()
 
-    # 查询所有产品代码
-    cursor.execute('SELECT DISTINCT 产品代码 FROM fund_nav_data ORDER BY 产品代码')
-    product_codes = [row[0] for row in cursor.fetchall()]
+    cursor.execute('''
+        SELECT f.fund_id, f.产品代码, f.产品名称,
+               COUNT(n.id), MIN(n.净值日期), MAX(n.净值日期)
+        FROM funds f
+        LEFT JOIN fund_nav_data n ON f.fund_id = n.fund_id
+        GROUP BY f.fund_id
+        ORDER BY f.fund_id
+    ''')
+    rows = cursor.fetchall()
 
     print("\n" + "="*80)
     print("数据库统计信息")
     print("="*80)
 
-    # 统计总记录数
-    cursor.execute('SELECT COUNT(*) FROM fund_nav_data')
-    total_count = cursor.fetchone()[0]
-
+    total_count = sum(r[3] or 0 for r in rows)
     print(f"\n数据库中共有 {total_count} 条净值记录")
-    print(f"涵盖 {len(product_codes)} 个不同的基金产品")
+    print(f"涵盖 {len(rows)} 个不同的基金产品")
 
-    # 显示每个产品的记录数
     print("\n" + "-"*80)
     print("各基金净值记录统计:")
     print("-"*80)
 
-    for product_code in product_codes:
-        # 查询该产品的记录数和日期范围
-        cursor.execute('''
-            SELECT 产品名称, COUNT(*), MIN(净值日期), MAX(净值日期)
-            FROM fund_nav_data
-            WHERE 产品代码 = ?
-            GROUP BY 产品名称
-        ''', (product_code,))
-
-        row = cursor.fetchone()
-        if row:
-            product_name, count, min_date, max_date = row
-            if product_name:
-                print(f"\n{product_code} - {product_name}")
-            else:
-                print(f"\n{product_code}")
-            print(f"  记录数: {count} 条")
-            print(f"  日期范围: {min_date} ~ {max_date}")
+    for fund_id, product_code, product_name, count, min_date, max_date in rows:
+        label = f"{product_code} - {product_name}" if product_name else product_code
+        print(f"\n[{fund_id:03d}] {label}")
+        print(f"  记录数: {count} 条")
+        print(f"  日期范围: {min_date} ~ {max_date}")
 
     print("\n" + "="*80)
 

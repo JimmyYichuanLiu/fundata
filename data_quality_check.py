@@ -22,11 +22,12 @@ def check1_nav_out_of_range(src_conn):
     """检测1：单位净值或累计单位净值 > 5"""
     cursor = src_conn.cursor()
     cursor.execute('''
-        SELECT f.id, f.产品名称, f.产品代码, f.净值日期, f.单位净值, f.累计单位净值,
+        SELECT f.fund_id, f.id, f.产品名称, f.产品代码, f.净值日期, f.单位净值, f.累计单位净值,
                e.邮件主题, e.邮件发件人, e.邮件日期, e.附件文件名, e.sheet名称
         FROM fund_nav_data f
         LEFT JOIN email_sources e ON f.source_id = e.id
         WHERE f.单位净值 > 5 OR (f.累计单位净值 IS NOT NULL AND f.累计单位净值 > 5)
+        ORDER BY f.fund_id
     ''')
     return cursor.fetchall()
 
@@ -50,14 +51,16 @@ def check2_same_name_multi_code(src_conn):
         sources = []
         for code in codes:
             cursor.execute('''
-                SELECT DISTINCT e.邮件主题, e.邮件发件人, e.邮件日期, e.附件文件名
+                SELECT DISTINCT f.fund_id, e.邮件主题, e.邮件发件人, e.邮件日期, e.附件文件名
                 FROM fund_nav_data f
                 LEFT JOIN email_sources e ON f.source_id = e.id
                 WHERE f.产品名称 = ? AND f.产品代码 = ?
                 LIMIT 3
             ''', (product_name, code.strip()))
             rows = cursor.fetchall()
-            sources.append({'code': code.strip(), 'emails': rows})
+            fund_id = rows[0][0] if rows else None
+            emails = [(r[1], r[2], r[3], r[4]) for r in rows]
+            sources.append({'code': code.strip(), 'fund_id': fund_id, 'emails': emails})
         details.append({
             'product_name': product_name,
             'codes': codes,
@@ -71,24 +74,35 @@ def check3_duplicate_nav_dates(src_conn):
     """检测3：重复净值日期（同产品代码同日期多条记录）"""
     cursor = src_conn.cursor()
     cursor.execute('''
-        SELECT 产品名称, 产品代码, 净值日期, COUNT(*) as cnt
-        FROM fund_nav_data
-        GROUP BY 产品名称, 产品代码, 净值日期
+        SELECT n.fund_id, MIN(n.产品名称), n.产品代码, n.净值日期, COUNT(*) as cnt
+        FROM fund_nav_data n
+        GROUP BY n.产品代码, n.净值日期
         HAVING COUNT(*) > 1
+        ORDER BY n.fund_id
     ''')
     return cursor.fetchall()
 
 
 def build_clean_db(src_conn, clean_db_path):
-    """构建 fund_clean.db：排除异常记录，反范式化来源信息"""
-    # 统计源数据总数
+    """构建 fund_clean.db：排除异常记录，反范式化来源信息，同步 funds 表"""
     cursor = src_conn.cursor()
+
+    # 统计源数据总数
     cursor.execute('SELECT COUNT(*) FROM fund_nav_data')
     total_src = cursor.fetchone()[0]
 
-    # 查询需要写入的干净数据
+    # 读取 funds 表（用于同步到 clean DB）
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='funds'")
+    has_funds = cursor.fetchone() is not None
+    if has_funds:
+        cursor.execute('SELECT fund_id, 产品代码, 产品名称, 首次录入时间 FROM funds ORDER BY fund_id')
+        funds_rows = cursor.fetchall()
+    else:
+        funds_rows = []
+
+    # 查询需要写入的干净数据（含 fund_id）
     cursor.execute('''
-        SELECT f.产品名称, f.产品代码, f.净值日期, f.单位净值, f.累计单位净值,
+        SELECT f.fund_id, f.产品名称, f.产品代码, f.净值日期, f.单位净值, f.累计单位净值,
                e.邮件主题, e.邮件发件人, e.邮件日期, e.附件文件名, e.sheet名称, f.source_id
         FROM fund_nav_data f
         LEFT JOIN email_sources e ON f.source_id = e.id
@@ -96,7 +110,7 @@ def build_clean_db(src_conn, clean_db_path):
           AND (f.累计单位净值 IS NULL OR f.累计单位净值 <= 5)
           AND f.id = (SELECT MIN(f2.id) FROM fund_nav_data f2
                       WHERE f2.产品代码 = f.产品代码 AND f2.净值日期 = f.净值日期)
-        ORDER BY f.产品代码, f.净值日期
+        ORDER BY f.fund_id, f.净值日期
     ''')
     clean_rows = cursor.fetchall()
 
@@ -106,9 +120,27 @@ def build_clean_db(src_conn, clean_db_path):
 
     clean_conn = sqlite3.connect(clean_db_path)
     clean_cursor = clean_conn.cursor()
+
+    # 创建 funds 表（与源库保持同步）
+    clean_cursor.execute('''
+        CREATE TABLE IF NOT EXISTS funds (
+            fund_id INTEGER PRIMARY KEY,
+            产品代码 TEXT NOT NULL UNIQUE,
+            产品名称 TEXT,
+            首次录入时间 DATETIME
+        )
+    ''')
+    if funds_rows:
+        clean_cursor.executemany(
+            'INSERT OR IGNORE INTO funds (fund_id, 产品代码, 产品名称, 首次录入时间) VALUES (?, ?, ?, ?)',
+            funds_rows
+        )
+
+    # 创建净值数据表（含 fund_id）
     clean_cursor.execute('''
         CREATE TABLE IF NOT EXISTS fund_nav_data (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fund_id INTEGER REFERENCES funds(fund_id),
             产品名称 TEXT,
             产品代码 TEXT NOT NULL,
             净值日期 TEXT NOT NULL,
@@ -127,9 +159,9 @@ def build_clean_db(src_conn, clean_db_path):
 
     clean_cursor.executemany('''
         INSERT OR IGNORE INTO fund_nav_data
-        (产品名称, 产品代码, 净值日期, 单位净值, 累计单位净值,
+        (fund_id, 产品名称, 产品代码, 净值日期, 单位净值, 累计单位净值,
          来源邮件主题, 来源发件人, 来源邮件日期, 来源附件文件名, 来源sheet名称, source_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', clean_rows)
     clean_conn.commit()
     clean_conn.close()
@@ -152,8 +184,9 @@ def print_report(check1_rows, check2_details, check3_rows, total_src, written, e
     if check1_rows:
         print(f"  发现 {len(check1_rows)} 条异常记录：")
         for row in check1_rows:
-            rid, name, code, date, nav, accum_nav, subj, sender, edate, fname, sheet = row
-            print(f"  ID={rid} | {code} - {name or '未知'} | {date}")
+            fund_id, rid, name, code, date, nav, accum_nav, subj, sender, edate, fname, sheet = row
+            fid_str = f"[{fund_id:03d}] " if fund_id is not None else ""
+            print(f"  {fid_str}ID={rid} | {code} - {name or '未知'} | {date}")
             print(f"    单位净值={nav}  累计单位净值={accum_nav}")
             if subj or fname:
                 print(f"    来源邮件: {subj or '无'} | 发件人: {sender or '无'} | 附件: {fname or '无'}")
@@ -170,7 +203,9 @@ def print_report(check1_rows, check2_details, check3_rows, total_src, written, e
             print(f"  对应代码: {', '.join(item['codes'])}（共{item['code_count']}个）")
             print("  来源追溯:")
             for src in item['sources']:
-                print(f"    代码 {src['code']}:")
+                fund_id = src.get('fund_id')
+                fid_str = f"[{fund_id:03d}] " if fund_id is not None else ""
+                print(f"    {fid_str}代码 {src['code']}:")
                 if src['emails']:
                     for e in src['emails']:
                         subj, sender, edate, fname = e
@@ -186,8 +221,9 @@ def print_report(check1_rows, check2_details, check3_rows, total_src, written, e
     if check3_rows:
         print(f"  发现 {len(check3_rows)} 条重复净值日期：")
         for row in check3_rows:
-            name, code, date, cnt = row
-            print(f"  {code} - {name or '未知'} | {date} | 重复 {cnt} 次")
+            fund_id, name, code, date, cnt = row
+            fid_str = f"[{fund_id:03d}] " if fund_id is not None else ""
+            print(f"  {fid_str}{code} - {name or '未知'} | {date} | 重复 {cnt} 次")
     else:
         print("  未发现异常")
 
@@ -214,13 +250,20 @@ def main():
 
     src_conn = sqlite3.connect(db_path)
 
-    # 检查 email_sources 表是否存在（兼容旧库）
+    # 检查辅助表是否存在（兼容旧库）
     cursor = src_conn.cursor()
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='email_sources'")
     has_sources_table = cursor.fetchone() is not None
 
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='funds'")
+    has_funds_table = cursor.fetchone() is not None
+
     if not has_sources_table:
         print("警告：源数据库中不存在 email_sources 表，来源信息将为空。")
+        print("请先运行 get_163_email.py 以建立该表。")
+
+    if not has_funds_table:
+        print("警告：源数据库中不存在 funds 表，fund_id 信息将为空。")
         print("请先运行 get_163_email.py 以建立该表。")
 
     check1_rows = check1_nav_out_of_range(src_conn)
