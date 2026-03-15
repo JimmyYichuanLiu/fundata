@@ -19,3 +19,12 @@ nul
 # IDE
 .idea/
 .vscode/
+
+# Frontend build artifacts & dependencies
+web/node_modules/
+web/dist/
+web/.claude/
+
+# Claude project files
+.claude/
+.mcp.json

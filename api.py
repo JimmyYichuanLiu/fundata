@@ -8,12 +8,13 @@ FastAPI application exposing CRUD + search endpoints for fund_data.db
 # =============================================================================
 # Section 1: Imports
 # =============================================================================
+import json
 import logging
 import os
 import sqlite3
 import threading
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import date as _date, datetime, timedelta
 from typing import Dict, List, Optional
 
 import uvicorn
@@ -35,14 +36,49 @@ load_dotenv()
 DB_PATH: str = os.getenv("DB_PATH", "fund_data.db")
 API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
 API_PORT: int = int(os.getenv("API_PORT", "8000"))
-TUSHARE_TOKEN: str = os.getenv("TUSHARE_TOKEN", "")
+_INTRADAY_MODE: bool = os.getenv("MARKET_INTRADAY_MODE", "0").strip() == "1"
+
+# Mapping from stock-index futures symbol to underlying index ts_code
+# (bond futures IF/IC/IH/IM are the only ones with a spot index equivalent)
+FUTURES_TO_INDEX = {
+    "IF": "000300.SH",
+    "IC": "000905.SH",
+    "IH": "000016.SH",
+    "IM": "000852.SH",
+}
+
+# Quarterly delivery months for CFFEX stock-index futures
+_QUARTERLY_MONTHS = {3, 6, 9, 12}
+
+
+def _third_friday(year: int, month: int) -> _date:
+    """Third Friday of year/month — CFFEX stock-index futures expiry day."""
+    first = _date(year, month, 1)
+    days = (4 - first.weekday()) % 7      # days until first Friday (Mon=0, Fri=4)
+    return first + timedelta(days=days + 14)  # + 2 weeks = 3rd Friday
+
+# 原油数据模块（独立，失败不影响主 API）
+try:
+    from crude_api import crude_router as _crude_router, _run_crude_sync
+    _CRUDE_ENABLED = True
+except ImportError:
+    _crude_router = None
+    _run_crude_sync = None
+    _CRUDE_ENABLED = False
 
 try:
-    from get_market_data import connect_and_fetch_market as _connect_and_fetch_market, INDEX_NAMES as _INDEX_NAMES
+    from get_market_data import (
+        connect_and_fetch_market as _connect_and_fetch_market,
+        connect_and_fetch_market_5min as _connect_and_fetch_market_5min,
+        connect_and_fetch_realtime as _connect_and_fetch_realtime,
+        INDEX_NAMES as _INDEX_NAMES,
+    )
     _MARKET_ENABLED = True
 except ImportError:
     _MARKET_ENABLED = False
     _connect_and_fetch_market = None
+    _connect_and_fetch_market_5min = None
+    _connect_and_fetch_realtime = None
     _INDEX_NAMES = {}
 
 logging.basicConfig(
@@ -102,6 +138,28 @@ def _init_db_schema():
         conn.execute('CREATE INDEX IF NOT EXISTS idx_product_code ON fund_nav_data(产品代码)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_nav_date ON fund_nav_data(净值日期)')
 
+        # Tag tables
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS fund_tags (
+                tag_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+                tag_name  TEXT NOT NULL UNIQUE,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS fund_tag_assignments (
+                fund_id INTEGER NOT NULL REFERENCES funds(fund_id) ON DELETE CASCADE,
+                tag_id  INTEGER NOT NULL REFERENCES fund_tags(tag_id) ON DELETE CASCADE,
+                PRIMARY KEY (fund_id, tag_id)
+            )
+        """)
+
+        # Add benchmark_index column to funds if missing
+        try:
+            conn.execute('ALTER TABLE funds ADD COLUMN benchmark_index TEXT DEFAULT NULL')
+        except Exception:
+            pass  # column already exists
+
     logger.info("Database schema initialised at %s", DB_PATH)
 
 
@@ -112,8 +170,18 @@ _scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
 async def lifespan(app: FastAPI):
     _init_db_schema()
     _scheduler.add_job(_run_sync, "cron", hour="12,18", minute=0)
-    if _MARKET_ENABLED and TUSHARE_TOKEN:
-        _scheduler.add_job(_run_market_sync, "cron", hour=17, minute=0)
+    if _MARKET_ENABLED:
+        # Daily snapshots: midday (11:30) and post-market close (15:15)
+        _scheduler.add_job(_run_market_sync, "cron", hour=11, minute=30)
+        _scheduler.add_job(_run_market_sync, "cron", hour=15, minute=15)
+        # Real-time snapshot every 5 minutes during trading hours
+        _scheduler.add_job(_run_realtime_sync, "interval", minutes=5)
+        if _INTRADAY_MODE:
+            # Optional 5-minute intraday K-line polling during trading hours
+            _scheduler.add_job(_run_market_5min_sync, "interval", minutes=5)
+    if _CRUDE_ENABLED:
+        # 原油数据：收盘后 15:20 更新
+        _scheduler.add_job(_run_crude_sync, "cron", hour=15, minute=20)
     _scheduler.start()
     logger.info("Scheduler started")
     yield
@@ -134,6 +202,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 挂载原油路由（独立模块）
+if _CRUDE_ENABLED:
+    app.include_router(_crude_router)
 
 # =============================================================================
 # Section 4: Pydantic Models
@@ -164,6 +236,7 @@ class FundDetail(FundSummary):
     latest_date: Optional[str]
     latest_nav: Optional[float]
     anomalous_count: int = 0
+    benchmark_index: Optional[str] = None
 
 
 class FundIssue(BaseModel):
@@ -255,6 +328,15 @@ class FundNavSeries(BaseModel):
 
 class CompareResponse(BaseModel):
     funds: Dict[int, FundNavSeries]
+
+
+class TagCreate(BaseModel):
+    tag_name: str
+
+
+class TagResponse(BaseModel):
+    tag_id: int
+    tag_name: str
 
 
 # =============================================================================
@@ -427,11 +509,9 @@ def _run_market_sync():
     try:
         _set_sync_key("market_last_status", "running")
         _set_sync_key("market_last_error", "")
-        if not TUSHARE_TOKEN:
-            raise ValueError("TUSHARE_TOKEN not configured")
         if not _MARKET_ENABLED:
-            raise ImportError("get_market_data module not available (tushare not installed?)")
-        _connect_and_fetch_market(TUSHARE_TOKEN, DB_PATH)
+            raise ImportError("get_market_data module not available (akshare not installed?)")
+        _connect_and_fetch_market(DB_PATH)
         _set_sync_key("market_last_status", "success")
         _set_sync_key("market_last_error", "")
     except Exception as e:
@@ -439,6 +519,36 @@ def _run_market_sync():
         _set_sync_key("market_last_error", str(e))
     finally:
         _market_sync_lock.release()
+
+
+_market_5min_lock = threading.Lock()
+
+
+def _run_market_5min_sync():
+    if not _market_5min_lock.acquire(blocking=False):
+        return
+    try:
+        if _MARKET_ENABLED:
+            _connect_and_fetch_market_5min(DB_PATH)
+    except Exception as e:
+        logger.warning("Market 5-min sync error: %s", e)
+    finally:
+        _market_5min_lock.release()
+
+
+_realtime_lock = threading.Lock()
+
+
+def _run_realtime_sync():
+    if not _realtime_lock.acquire(blocking=False):
+        return
+    try:
+        if _MARKET_ENABLED:
+            _connect_and_fetch_realtime(DB_PATH)
+    except Exception as e:
+        logger.warning("Realtime sync error: %s", e)
+    finally:
+        _realtime_lock.release()
 
 
 def _compute_issues(conn, fund_id: int) -> dict:
@@ -541,9 +651,18 @@ def get_stats(conn: sqlite3.Connection = Depends(get_db)):
 # --- Fund list --------------------------------------------------------------
 
 @app.get("/api/funds", response_model=FundListResponse, tags=["funds"])
-def list_funds(conn: sqlite3.Connection = Depends(get_db)):
+def list_funds(
+    tag_id: Optional[int] = Query(None),
+    conn: sqlite3.Connection = Depends(get_db),
+):
+    tag_filter = ""
+    tag_params: list = []
+    if tag_id is not None:
+        tag_filter = " WHERE f.fund_id IN (SELECT fund_id FROM fund_tag_assignments WHERE tag_id=?)"
+        tag_params = [tag_id]
+
     rows = conn.execute(
-        """
+        f"""
         SELECT
             f.fund_id,
             f.产品代码,
@@ -555,10 +674,28 @@ def list_funds(conn: sqlite3.Connection = Depends(get_db)):
             COUNT(CASE WHEN n.单位净值 > 5 THEN 1 END)   AS anomalous_count
         FROM funds f
         LEFT JOIN fund_nav_data n ON f.fund_id = n.fund_id
+        {tag_filter}
         GROUP BY f.fund_id
         ORDER BY f.fund_id
+        """,
+        tag_params,
+    ).fetchall()
+
+    # Build a tags map: fund_id -> list of {tag_id, tag_name}
+    tag_rows = conn.execute(
+        """
+        SELECT a.fund_id, t.tag_id, t.tag_name
+        FROM fund_tag_assignments a
+        JOIN fund_tags t ON t.tag_id = a.tag_id
+        ORDER BY a.fund_id, t.tag_id
         """
     ).fetchall()
+    tags_map: dict = {}
+    for tr in tag_rows:
+        fid = tr["fund_id"]
+        if fid not in tags_map:
+            tags_map[fid] = []
+        tags_map[fid].append({"tag_id": tr["tag_id"], "tag_name": tr["tag_name"]})
 
     items: List[FundDetail] = []
     for r in rows:
@@ -574,21 +711,22 @@ def list_funds(conn: sqlite3.Connection = Depends(get_db)):
                 except (TypeError, ValueError):
                     latest_nav = None
 
-        items.append(
-            FundDetail(
-                fund_id=r["fund_id"],
-                product_code=r["产品代码"],
-                product_name=r["产品名称"],
-                first_entry_time=r["首次录入时间"],
-                record_count=r["record_count"] or 0,
-                earliest_date=db_date_to_api(r["earliest_date"]),
-                latest_date=db_date_to_api(r["latest_date"]),
-                latest_nav=latest_nav,
-                anomalous_count=r["anomalous_count"] or 0,
-            )
+        fd = FundDetail(
+            fund_id=r["fund_id"],
+            product_code=r["产品代码"],
+            product_name=r["产品名称"],
+            first_entry_time=r["首次录入时间"],
+            record_count=r["record_count"] or 0,
+            earliest_date=db_date_to_api(r["earliest_date"]),
+            latest_date=db_date_to_api(r["latest_date"]),
+            latest_nav=latest_nav,
+            anomalous_count=r["anomalous_count"] or 0,
         )
+        d = fd.model_dump()
+        d["tags"] = tags_map.get(r["fund_id"], [])
+        items.append(d)
 
-    return FundListResponse(total=len(items), items=items)
+    return {"total": len(items), "items": items}
 
 
 # --- Fund search (must be before /{fund_id}) --------------------------------
@@ -632,6 +770,131 @@ def get_all_issues(conn: sqlite3.Connection = Depends(get_db)):
     return {"issues": issues}
 
 
+# --- Batch fund returns (solves N+1 on FundList) ---------------------------
+
+@app.get("/api/funds/returns", tags=["funds"])
+def get_fund_returns(
+    periods: str = Query("1w,1m,3m,6m", description="Comma-separated period codes: 1w,1m,3m,6m,1y,ytd,inception"),
+    tag_id: Optional[int] = Query(None),
+    conn: sqlite3.Connection = Depends(get_db),
+):
+    """Return multi-period returns + sparkline for all funds in a single query."""
+    period_list = [p.strip() for p in periods.split(",") if p.strip()]
+
+    # Determine max lookback needed (180 days covers 6m; 365 for 1y)
+    max_days = 180
+    for p in period_list:
+        if p == "1y" or p == "ytd" or p == "inception":
+            max_days = 99999
+            break
+
+    tag_filter = ""
+    tag_params: list = []
+    if tag_id is not None:
+        tag_filter = " AND n.fund_id IN (SELECT fund_id FROM fund_tag_assignments WHERE tag_id=?)"
+        tag_params = [tag_id]
+
+    # Compute cutoff date
+    import datetime as _dt
+    today = _dt.date.today()
+    if max_days < 99999:
+        cutoff = (today - _dt.timedelta(days=max_days + 30)).strftime("%Y%m%d")
+    else:
+        cutoff = "19000101"
+
+    rows = conn.execute(
+        f"""
+        SELECT n.fund_id, n.净值日期 AS nav_date, n.单位净值 AS unit_nav
+        FROM fund_nav_data n
+        WHERE n.净值日期 >= ?
+          AND n.单位净值 IS NOT NULL
+          AND n.单位净值 > 0
+          AND n.单位净值 <= 5
+          {tag_filter}
+        ORDER BY n.fund_id, n.净值日期
+        """,
+        [cutoff] + tag_params,
+    ).fetchall()
+
+    # Group by fund_id
+    from collections import defaultdict
+    fund_data: dict = defaultdict(list)
+    for r in rows:
+        fund_data[r["fund_id"]].append((r["nav_date"], float(r["unit_nav"])))
+
+    def _period_return(series, period_code):
+        """Compute return for a period code from a sorted (date, nav) series."""
+        if len(series) < 2:
+            return None
+        last_date_str, last_nav = series[-1]
+        if period_code == "inception":
+            first_nav = series[0][1]
+            return (last_nav - first_nav) / first_nav * 100 if first_nav > 0 else None
+
+        if period_code == "ytd":
+            year_start = last_date_str[:4] + "0101"
+            for d, v in series:
+                if d >= year_start and v > 0:
+                    return (last_nav - v) / v * 100
+            return None
+
+        days_map = {"1w": 7, "1m": 30, "3m": 90, "6m": 180, "1y": 365}
+        days = days_map.get(period_code)
+        if days is None:
+            return None
+
+        target = (today - _dt.timedelta(days=days)).strftime("%Y%m%d")
+        # Find nearest data point on or after target
+        for d, v in series:
+            if d >= target and v > 0:
+                return (last_nav - v) / v * 100
+        return None
+
+    items = {}
+    for fid, series in fund_data.items():
+        entry = {}
+        for p in period_list:
+            entry[p] = _period_return(series, p)
+        # Sparkline: sample up to 30 points from recent 90 days
+        cutoff_90 = (today - _dt.timedelta(days=90)).strftime("%Y%m%d")
+        recent = [(d, v) for d, v in series if d >= cutoff_90]
+        if len(recent) > 30:
+            step = len(recent) / 30
+            sampled = [recent[int(i * step)] for i in range(30)]
+        else:
+            sampled = recent
+        if sampled and sampled[0][1] > 0:
+            base = sampled[0][1]
+            entry["sparkline"] = [round(v / base, 4) for _, v in sampled]
+        else:
+            entry["sparkline"] = []
+        items[fid] = entry
+
+    return {"items": items}
+
+
+# --- Set fund benchmark ----------------------------------------------------
+
+class BenchmarkUpdateRequest(BaseModel):
+    benchmark_index: Optional[str] = None
+
+
+@app.put("/api/funds/{fund_id}/benchmark", tags=["funds"])
+def set_fund_benchmark(
+    fund_id: int,
+    body: BenchmarkUpdateRequest,
+    conn: sqlite3.Connection = Depends(get_db),
+):
+    row = conn.execute("SELECT fund_id FROM funds WHERE fund_id = ?", (fund_id,)).fetchone()
+    if not row:
+        raise NavAPIError(404, f"Fund {fund_id} not found", "NOT_FOUND")
+    conn.execute(
+        "UPDATE funds SET benchmark_index = ? WHERE fund_id = ?",
+        (body.benchmark_index, fund_id),
+    )
+    return {"fund_id": fund_id, "benchmark_index": body.benchmark_index}
+
+
 # --- Single fund detail -----------------------------------------------------
 
 @app.get("/api/funds/{fund_id}", response_model=FundDetail, tags=["funds"])
@@ -640,6 +903,7 @@ def get_fund(fund_id: int, conn: sqlite3.Connection = Depends(get_db)):
         """
         SELECT
             f.fund_id, f.产品代码, f.产品名称, f.首次录入时间,
+            f.benchmark_index,
             COUNT(n.id) AS record_count,
             MIN(n.净值日期) AS earliest_date,
             MAX(n.净值日期) AS latest_date
@@ -675,6 +939,7 @@ def get_fund(fund_id: int, conn: sqlite3.Connection = Depends(get_db)):
         earliest_date=db_date_to_api(row["earliest_date"]),
         latest_date=db_date_to_api(row["latest_date"]),
         latest_nav=latest_nav,
+        benchmark_index=row["benchmark_index"],
     )
 
 
@@ -1100,6 +1365,317 @@ def get_futures_daily(
     return {"ts_code": ts_code, "items": [dict(r) for r in rows]}
 
 
+@app.get("/api/market/basis/{symbol}/daily", tags=["market"])
+def get_basis_daily(
+    symbol: str,
+    date_from: Optional[str] = Query(None, description="Start date YYYYMMDD"),
+    date_to: Optional[str] = Query(None, description="End date YYYYMMDD"),
+    limit: int = Query(250, ge=1, le=2000),
+    conn: sqlite3.Connection = Depends(get_db),
+):
+    symbol = symbol.upper()
+    if symbol not in FUTURES_TO_INDEX:
+        raise NavAPIError(404, f"No index mapping for symbol {symbol}", "NOT_FOUND")
+    index_ts_code = FUTURES_TO_INDEX[symbol]
+    if not _market_table_exists(conn, "futures_daily") or not _market_table_exists(conn, "index_daily"):
+        return {"symbol": symbol, "index_ts_code": index_ts_code, "items": []}
+    params: list = [symbol, index_ts_code]
+    date_where = ""
+    if date_from:
+        date_where += " AND f.trade_date >= ?"
+        params.append(date_from)
+    if date_to:
+        date_where += " AND f.trade_date <= ?"
+        params.append(date_to)
+    params.append(limit)
+    sql = f"""
+        SELECT f.trade_date,
+               f.ts_code   AS futures_code,
+               f.close     AS futures_close,
+               i.close     AS index_close,
+               (i.close - f.close) AS basis,
+               CASE WHEN f.close IS NOT NULL AND f.close != 0
+                    THEN ROUND((i.close - f.close) / f.close * 100, 4)
+                    ELSE NULL END AS basis_pct
+        FROM (
+            SELECT trade_date, ts_code, close, oi, vol,
+                   ROW_NUMBER() OVER (PARTITION BY trade_date
+                                      ORDER BY COALESCE(oi, vol, 0) DESC) AS rn
+            FROM futures_daily WHERE symbol = ?
+        ) f
+        JOIN index_daily i ON i.trade_date = f.trade_date AND i.ts_code = ?
+        WHERE f.rn = 1{date_where}
+        ORDER BY f.trade_date DESC LIMIT ?
+    """
+    rows = conn.execute(sql, params).fetchall()
+    items = [dict(r) for r in reversed(rows)]
+    return {"symbol": symbol, "index_ts_code": index_ts_code, "items": items}
+
+
+@app.get("/api/market/basis/{symbol}/quarterly", tags=["market"])
+def get_basis_quarterly(
+    symbol: str,
+    date_from: Optional[str] = Query(None, description="Start date YYYYMMDD"),
+    date_to: Optional[str] = Query(None, description="End date YYYYMMDD"),
+    conn: sqlite3.Connection = Depends(get_db),
+):
+    """Per-trade-date basis for 当季 and 下季 quarterly contracts.
+
+    Basis = spot_close − futures_close  (positive → spot premium / 贴水)
+    Annualised basis % = basis / futures_close / remaining_days × 365 × 100
+    """
+    symbol = symbol.upper()
+    if symbol not in FUTURES_TO_INDEX:
+        raise NavAPIError(404, f"No index mapping for symbol {symbol}", "NOT_FOUND")
+    index_ts_code = FUTURES_TO_INDEX[symbol]
+    if not _market_table_exists(conn, "futures_daily") or not _market_table_exists(conn, "index_daily"):
+        return {"symbol": symbol, "index_ts_code": index_ts_code, "items": []}
+
+    params: list = [index_ts_code, symbol]
+    date_where = ""
+    if date_from:
+        date_where += " AND f.trade_date >= ?"
+        params.append(date_from)
+    if date_to:
+        date_where += " AND f.trade_date <= ?"
+        params.append(date_to)
+
+    # Fetch all quarterly contracts for this symbol joined with spot index
+    sql = f"""
+        SELECT f.trade_date,
+               f.ts_code   AS ts_code,
+               f.close     AS futures_close,
+               i.close     AS index_close
+        FROM futures_daily f
+        JOIN index_daily i ON i.trade_date = f.trade_date AND i.ts_code = ?
+        WHERE f.symbol = ?
+          AND CAST(SUBSTR(f.ts_code, -2) AS INTEGER) IN (3, 6, 9, 12)
+          {date_where}
+        ORDER BY f.trade_date ASC, f.ts_code ASC
+    """
+    rows = conn.execute(sql, params).fetchall()
+
+    # Group by trade_date and classify 当季 / 下季
+    from collections import defaultdict
+    by_date: dict = defaultdict(list)
+    for row in rows:
+        by_date[row["trade_date"]].append(dict(row))
+
+    items = []
+    for trade_date in sorted(by_date.keys()):
+        trade_date_obj = _date(
+            int(trade_date[:4]), int(trade_date[4:6]), int(trade_date[6:8])
+        )
+        index_close = by_date[trade_date][0]["index_close"]
+
+        # Build list of unexpired contracts for this date, sorted by expiry
+        contracts = []
+        for r in by_date[trade_date]:
+            ts = r["ts_code"]
+            try:
+                year = 2000 + int(ts[-4:-2])
+                month = int(ts[-2:])
+                expiry = _third_friday(year, month)
+            except (ValueError, IndexError):
+                continue
+            if expiry <= trade_date_obj:
+                continue   # already expired
+            remaining = (expiry - trade_date_obj).days
+            contracts.append({
+                "ts_code": ts,
+                "futures_close": r["futures_close"],
+                "expiry": expiry,
+                "remaining_days": remaining,
+            })
+        contracts.sort(key=lambda x: x["expiry"])
+
+        for i, label in enumerate(["当季", "下季"]):
+            if i >= len(contracts):
+                break
+            c = contracts[i]
+            fc = c["futures_close"]
+            ic = index_close
+            basis = round(ic - fc, 4) if ic is not None and fc is not None else None
+            ann_basis = None
+            if basis is not None and fc and c["remaining_days"] >= 7:
+                ann_basis = round(basis / fc / c["remaining_days"] * 365 * 100, 4)
+            items.append({
+                "trade_date": trade_date,
+                "contract_type": label,
+                "ts_code": c["ts_code"],
+                "futures_close": fc,
+                "index_close": ic,
+                "basis": basis,
+                "annualized_basis_pct": ann_basis,
+                "remaining_days": c["remaining_days"],
+                "expiry_date": c["expiry"].strftime("%Y%m%d"),
+            })
+
+    return {"symbol": symbol, "index_ts_code": index_ts_code, "items": items}
+
+
+@app.get("/api/market/basis/{symbol}/today", tags=["market"])
+def get_basis_today(
+    symbol: str,
+    conn: sqlite3.Connection = Depends(get_db),
+):
+    """All active contracts on the latest available trading day."""
+    symbol = symbol.upper()
+    if symbol not in FUTURES_TO_INDEX:
+        raise NavAPIError(404, f"No index mapping for symbol {symbol}", "NOT_FOUND")
+    index_ts_code = FUTURES_TO_INDEX[symbol]
+    if not _market_table_exists(conn, "futures_daily"):
+        return {"symbol": symbol, "trade_date": None, "items": []}
+
+    row = conn.execute(
+        "SELECT MAX(trade_date) FROM futures_daily WHERE symbol=?", (symbol,)
+    ).fetchone()
+    latest_date = row[0] if row else None
+    if not latest_date:
+        return {"symbol": symbol, "trade_date": None, "items": []}
+
+    rows = conn.execute("""
+        SELECT f.ts_code, f.close AS futures_close, i.close AS index_close
+        FROM futures_daily f
+        LEFT JOIN index_daily i ON i.trade_date = f.trade_date AND i.ts_code = ?
+        WHERE f.symbol = ? AND f.trade_date = ?
+          AND CAST(SUBSTR(f.ts_code, -2) AS INTEGER) IN (3, 6, 9, 12)
+        ORDER BY f.ts_code
+    """, (index_ts_code, symbol, latest_date)).fetchall()
+
+    today_obj = _date(int(latest_date[:4]), int(latest_date[4:6]), int(latest_date[6:8]))
+    items = []
+    active_count = 0
+    for r in rows:
+        ts = r["ts_code"]
+        try:
+            year = 2000 + int(ts[-4:-2])
+            month = int(ts[-2:])
+            expiry = _third_friday(year, month)
+        except (ValueError, IndexError):
+            continue
+        if expiry <= today_obj:
+            continue
+        remaining = (expiry - today_obj).days
+        fc = r["futures_close"]
+        ic = r["index_close"]
+        basis = round(ic - fc, 4) if ic is not None and fc is not None else None
+        ann_basis = None
+        if basis is not None and fc and remaining >= 7:
+            ann_basis = round(basis / fc / remaining * 365 * 100, 4)
+        active_count += 1
+        label = ["当季", "下季", "隔季"][min(active_count - 1, 2)]
+        items.append({
+            "ts_code": ts,
+            "contract_type": label,
+            "expiry_date": expiry.strftime("%Y%m%d"),
+            "remaining_days": remaining,
+            "futures_close": fc,
+            "index_close": ic,
+            "basis": basis,
+            "annualized_basis_pct": ann_basis,
+        })
+
+    return {"symbol": symbol, "trade_date": latest_date, "items": items}
+
+
+# --- Real-time market snapshots ---------------------------------------------
+
+@app.get("/api/market/realtime/indices", tags=["market"])
+def get_realtime_indices(conn: sqlite3.Connection = Depends(get_db)):
+    """Latest real-time snapshot for all indices."""
+    if not _market_table_exists(conn, "market_realtime"):
+        return {"items": [], "updated_at": None}
+    rows = conn.execute(
+        """SELECT ts_code, name, price, open, high, low, prev_close,
+                  pct_chg, volume, amount, updated_at
+           FROM market_realtime WHERE category='index'
+           ORDER BY ts_code"""
+    ).fetchall()
+    items = [dict(r) for r in rows]
+    updated_at = items[0]["updated_at"] if items else None
+    return {"items": items, "updated_at": updated_at}
+
+
+@app.get("/api/market/realtime/futures", tags=["market"])
+def get_realtime_futures(conn: sqlite3.Connection = Depends(get_db)):
+    """Latest real-time snapshot for all futures contracts."""
+    if not _market_table_exists(conn, "market_realtime"):
+        return {"items": [], "updated_at": None}
+    rows = conn.execute(
+        """SELECT ts_code, name, price, open, high, low, prev_close,
+                  pct_chg, volume, amount, extra_json, updated_at
+           FROM market_realtime WHERE category='futures'
+           ORDER BY ts_code"""
+    ).fetchall()
+    items = []
+    for r in rows:
+        d = dict(r)
+        extra = d.pop("extra_json", None)
+        if extra:
+            try:
+                d.update(json.loads(extra))
+            except (json.JSONDecodeError, TypeError):
+                pass
+        items.append(d)
+    updated_at = items[0]["updated_at"] if items else None
+    return {"items": items, "updated_at": updated_at}
+
+
+@app.post("/api/market/realtime/trigger", tags=["market"])
+def trigger_realtime_sync():
+    """Manually trigger a real-time snapshot sync."""
+    if not _MARKET_ENABLED:
+        raise NavAPIError(503, "Market module not available", "SERVICE_UNAVAILABLE")
+    threading.Thread(target=_run_realtime_sync, daemon=True).start()
+    return {"status": "triggered"}
+
+
+# --- Tags CRUD --------------------------------------------------------------
+
+@app.get("/api/tags", tags=["tags"])
+def list_tags(conn: sqlite3.Connection = Depends(get_db)):
+    rows = conn.execute("SELECT tag_id, tag_name FROM fund_tags ORDER BY tag_id").fetchall()
+    return {"items": [dict(r) for r in rows]}
+
+
+@app.post("/api/tags", status_code=201, tags=["tags"])
+def create_tag(body: TagCreate, conn: sqlite3.Connection = Depends(get_db)):
+    try:
+        cur = conn.execute(
+            "INSERT INTO fund_tags(tag_name) VALUES(?)", (body.tag_name.strip(),)
+        )
+        conn.commit()
+        return {"tag_id": cur.lastrowid, "tag_name": body.tag_name.strip()}
+    except sqlite3.IntegrityError:
+        raise NavAPIError(409, f"Tag '{body.tag_name}' already exists", "CONFLICT")
+
+
+@app.delete("/api/tags/{tag_id}", status_code=204, tags=["tags"])
+def delete_tag(tag_id: int, conn: sqlite3.Connection = Depends(get_db)):
+    conn.execute("DELETE FROM fund_tags WHERE tag_id=?", (tag_id,))
+    conn.commit()
+
+
+@app.post("/api/funds/{fund_id}/tags/{tag_id}", status_code=201, tags=["tags"])
+def assign_tag(fund_id: int, tag_id: int, conn: sqlite3.Connection = Depends(get_db)):
+    conn.execute(
+        "INSERT OR IGNORE INTO fund_tag_assignments(fund_id, tag_id) VALUES(?,?)",
+        (fund_id, tag_id),
+    )
+    conn.commit()
+    return {"fund_id": fund_id, "tag_id": tag_id}
+
+
+@app.delete("/api/funds/{fund_id}/tags/{tag_id}", status_code=204, tags=["tags"])
+def remove_tag(fund_id: int, tag_id: int, conn: sqlite3.Connection = Depends(get_db)):
+    conn.execute(
+        "DELETE FROM fund_tag_assignments WHERE fund_id=? AND tag_id=?",
+        (fund_id, tag_id),
+    )
+    conn.commit()
+
+
 # --- Market: sync status and trigger -----------------------------------------
 
 @app.get("/api/market/sync/status", tags=["market"])
@@ -1113,9 +1689,7 @@ def get_market_sync_status():
 @app.post("/api/market/sync/trigger", tags=["market"])
 def trigger_market_sync(background_tasks: BackgroundTasks):
     if not _MARKET_ENABLED:
-        raise NavAPIError(503, "Market data module not available (tushare not installed)", "NOT_AVAILABLE")
-    if not TUSHARE_TOKEN:
-        raise NavAPIError(400, "TUSHARE_TOKEN not configured", "NO_TOKEN")
+        raise NavAPIError(503, "Market data module not available (akshare not installed)", "NOT_AVAILABLE")
     background_tasks.add_task(_run_market_sync)
     return {"message": "market sync started"}
 

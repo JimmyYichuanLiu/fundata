@@ -1,75 +1,56 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import {
-  Chart as ChartJS,
-  CategoryScale,
-  LinearScale,
-  PointElement,
-  LineElement,
-  Title,
-  Tooltip,
-  Legend,
-  Filler,
-} from 'chart.js'
-import Annotation from 'chartjs-plugin-annotation'
-import { Line } from 'react-chartjs-2'
-import { fetchFund, fetchFundNav, fetchFundIssues, subtractDays, createNav, deleteNav } from '../api.js'
+import { fetchFund, fetchFundNav, fetchFundIssues, fetchIndexDaily, subtractDays, setFundBenchmark } from '../api.js'
+import { computeMetrics } from '../utils/metrics.js'
+import ChartTab, { BENCHMARK_OPTIONS } from './fund-detail/ChartTab.jsx'
+import MetricsTab from './fund-detail/MetricsTab.jsx'
+import PerformanceTab from './fund-detail/PerformanceTab.jsx'
 
-ChartJS.register(
-  CategoryScale,
-  LinearScale,
-  PointElement,
-  LineElement,
-  Title,
-  Tooltip,
-  Legend,
-  Filler,
-  Annotation
-)
-
-const RANGE_OPTIONS = [
-  { label: '近1周', days: 7 },
-  { label: '近1月', days: 30 },
-  { label: '近3月', days: 90 },
-  { label: '近6月', days: 180 },
-  { label: '近1年', days: 365 },
-  { label: '全部', days: 0 },
+const TABS = [
+  { key: 'chart', label: '业绩走势' },
+  { key: 'metrics', label: '业绩指标' },
+  { key: 'performance', label: '产品表现' },
 ]
 
-function StatCard({ label, value, valueClass }) {
-  return (
-    <div className="bg-white rounded-xl shadow p-4">
-      <p className="text-xs text-gray-500 mb-1">{label}</p>
-      <p className={`text-lg font-semibold ${valueClass || 'text-gray-900'}`}>{value}</p>
-    </div>
-  )
+function formatPctColor(val) {
+  if (val == null) return 'text-gray-400'
+  if (val > 0) return 'text-red-500'
+  if (val < 0) return 'text-emerald-600'
+  return 'text-gray-600'
 }
 
-function createGradient(ctx, chartArea) {
-  const gradient = ctx.createLinearGradient(0, chartArea.top, 0, chartArea.bottom)
-  gradient.addColorStop(0, 'rgba(59,130,246,0.3)')
-  gradient.addColorStop(1, 'rgba(59,130,246,0.01)')
-  return gradient
+function formatPct(val) {
+  if (val == null) return '—'
+  return `${val > 0 ? '+' : ''}${val.toFixed(2)}%`
 }
 
 export default function FundDetail() {
   const { id } = useParams()
   const navigate = useNavigate()
-  const chartRef = useRef(null)
 
+  // Core data
   const [fund, setFund] = useState(null)
   const [navItems, setNavItems] = useState([])
   const [fundIssues, setFundIssues] = useState({ anomalous: [], gaps: [] })
-  const [activeDays, setActiveDays] = useState(0)
-  const [navType, setNavType] = useState('unit')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [retryCount, setRetryCount] = useState(0)
-  const [showNavForm, setShowNavForm] = useState(false)
-  const [navForm, setNavForm] = useState({ nav_date: '', unit_nav: '', accumulated_nav: '' })
-  const [submitting, setSubmitting] = useState(false)
-  const [navFormError, setNavFormError] = useState('')
 
+  // View state
+  const [activeTab, setActiveTab] = useState('chart')
+  const [activeDays, setActiveDays] = useState(0)
+  const [navType, setNavType] = useState('unit')
+
+  // Custom date range
+  const [isCustomRange, setIsCustomRange] = useState(false)
+  const [customFrom, setCustomFrom] = useState('')
+  const [customTo, setCustomTo] = useState('')
+
+  // Benchmark
+  const [benchmarkCode, setBenchmarkCode] = useState(null)
+  const [benchmarkItems, setBenchmarkItems] = useState([])
+
+  // ── Load fund data ──
   useEffect(() => {
     if (!id) { navigate('/'); return }
     const numId = parseInt(id, 10)
@@ -88,6 +69,12 @@ export default function FundDetail() {
       .then(([f, items]) => {
         setFund(f)
         setNavItems(items)
+        // Use saved benchmark if available
+        if (f.benchmark_index) {
+          setBenchmarkCode(f.benchmark_index)
+        } else {
+          setBenchmarkCode('000852.SH')
+        }
         setLoading(false)
       })
       .catch(err => {
@@ -96,7 +83,6 @@ export default function FundDetail() {
         setLoading(false)
       })
 
-    // Issues loaded independently so a failure here never blocks the main chart
     fetchFundIssues(numId, signal)
       .then(issues => setFundIssues(issues || { anomalous: [], gaps: [] }))
       .catch(err => { if (err.name !== 'AbortError') console.warn('fund issues load failed', err) })
@@ -104,204 +90,139 @@ export default function FundDetail() {
     return () => controller.abort()
   }, [id, navigate, retryCount])
 
-  // Filter by active days
+  // ── Filtered items ──
   const filteredItems = useMemo(() => {
+    if (isCustomRange) {
+      return navItems.filter(item => {
+        if (customFrom && item.nav_date < customFrom) return false
+        if (customTo && item.nav_date > customTo) return false
+        return true
+      })
+    }
     if (activeDays === 0 || navItems.length === 0) return navItems
     const latestDate = navItems[navItems.length - 1].nav_date
     const from = subtractDays(latestDate, activeDays)
     if (!from) return navItems
     return navItems.filter(item => item.nav_date >= from)
-  }, [navItems, activeDays])
+  }, [navItems, activeDays, isCustomRange, customFrom, customTo])
 
-  // Check if accumulated_nav data exists
+  const filteredDateFrom = filteredItems.length > 0 ? filteredItems[0].nav_date : ''
+  const filteredDateTo = filteredItems.length > 0 ? filteredItems[filteredItems.length - 1].nav_date : ''
+
+  // ── Load benchmark data ──
+  useEffect(() => {
+    if (!benchmarkCode || !filteredDateFrom) {
+      setBenchmarkItems([])
+      return
+    }
+    const controller = new AbortController()
+    fetchIndexDaily(
+      benchmarkCode,
+      {
+        date_from: filteredDateFrom.replace(/-/g, ''),
+        date_to: filteredDateTo.replace(/-/g, ''),
+        limit: 2000,
+      },
+      controller.signal,
+    )
+      .then(data => setBenchmarkItems(data.items || []))
+      .catch(err => { if (err.name !== 'AbortError') setBenchmarkItems([]) })
+    return () => controller.abort()
+  }, [benchmarkCode, filteredDateFrom, filteredDateTo])
+
+  // ── Normalize benchmark to fund dates ──
+  const normalizedData = useMemo(() => {
+    if (!benchmarkCode || benchmarkItems.length === 0 || filteredItems.length === 0) return null
+
+    const getVal = item => navType === 'unit' ? item.unit_nav : (item.accumulated_nav ?? item.unit_nav)
+    const sortedBench = [...benchmarkItems].sort((a, b) => a.trade_date.localeCompare(b.trade_date))
+
+    let benchIdx = 0
+    let firstCommonFundIdx = -1
+    let firstBenchClose = null
+
+    for (let i = 0; i < filteredItems.length; i++) {
+      const fundDateYmd = filteredItems[i].nav_date.replace(/-/g, '')
+      while (benchIdx < sortedBench.length - 1 && sortedBench[benchIdx + 1].trade_date <= fundDateYmd) {
+        benchIdx++
+      }
+      if (sortedBench[benchIdx].trade_date <= fundDateYmd) {
+        firstBenchClose = sortedBench[benchIdx].close
+        firstCommonFundIdx = i
+        break
+      }
+    }
+
+    if (firstCommonFundIdx === -1 || firstBenchClose == null) return null
+
+    const baseFundVal = getVal(filteredItems[firstCommonFundIdx])
+    const baseBenchVal = firstBenchClose
+    if (!baseFundVal || !baseBenchVal) return null
+
+    const labels = []
+    const fundNorm = []
+    const benchNorm = []
+
+    benchIdx = 0
+    let lastBenchClose = null
+
+    for (let i = firstCommonFundIdx; i < filteredItems.length; i++) {
+      const item = filteredItems[i]
+      const fundDateYmd = item.nav_date.replace(/-/g, '')
+
+      while (benchIdx < sortedBench.length - 1 && sortedBench[benchIdx + 1].trade_date <= fundDateYmd) {
+        benchIdx++
+      }
+      if (sortedBench[benchIdx].trade_date <= fundDateYmd) {
+        lastBenchClose = sortedBench[benchIdx].close
+      }
+
+      labels.push(item.nav_date)
+      fundNorm.push(getVal(item) / baseFundVal * 100)
+      benchNorm.push(lastBenchClose != null ? lastBenchClose / baseBenchVal * 100 : null)
+    }
+
+    return { labels, fundNorm, benchNorm }
+  }, [benchmarkCode, benchmarkItems, filteredItems, navType])
+
+  // ── Derived ──
   const hasAccumulated = useMemo(
     () => navItems.some(item => item.accumulated_nav != null),
-    [navItems]
+    [navItems],
   )
 
-  // Weekly return (client-side)
-  const weeklyPct = useMemo(() => {
+  // All-time metrics for hero section
+  const allMetrics = useMemo(() => computeMetrics(navItems, navType), [navItems, navType])
+
+  // YTD return
+  const ytdReturn = useMemo(() => {
     if (navItems.length < 2) return null
-    const latestDate = navItems[navItems.length - 1].nav_date
-    const from = subtractDays(latestDate, 14)
-    if (!from) return null
-    const recent = navItems.filter(i => i.nav_date >= from)
-    if (recent.length < 2) return null
-    const first = recent[0].unit_nav
-    const last = recent[recent.length - 1].unit_nav
-    return first > 0 ? (last - first) / first * 100 : null
-  }, [navItems])
-
-  // Chart data
-  const chartData = useMemo(() => {
-    const labels = filteredItems.map(i => i.nav_date)
-    const values = filteredItems.map(i =>
-      navType === 'unit' ? i.unit_nav : (i.accumulated_nav ?? i.unit_nav)
-    )
-    return { labels, values }
-  }, [filteredItems, navType])
-
-  // Chart.js dataset — memoized so the chart only re-draws when data truly changes
-  const [gradient, setGradient] = useState(null)
-
-  const data = useMemo(() => {
-    const pointColors = filteredItems.map(i =>
-      i.source_id === null ? 'rgba(234,88,12,0.8)' : 'transparent'
-    )
-    const pointRadii = filteredItems.map(i => i.source_id === null ? 4 : 0)
-    return {
-      labels: chartData.labels,
-      datasets: [
-        {
-          label: navType === 'unit' ? '单位净值' : '累计净值',
-          data: chartData.values,
-          borderColor: '#3b82f6',
-          backgroundColor: gradient || 'rgba(59,130,246,0.15)',
-          fill: true,
-          tension: 0.3,
-          pointRadius: pointRadii,
-          pointBackgroundColor: pointColors,
-          pointHoverRadius: 4,
-          pointHoverBackgroundColor: '#3b82f6',
-          borderWidth: 2,
-        },
-      ],
-    }
-  }, [chartData, gradient, navType, filteredItems])
-
-  const options = useMemo(() => {
-    // Build annotation objects for anomalous dates and gap ranges
-    const annotationEntries = {}
-
-    fundIssues.anomalous.forEach((a, i) => {
-      annotationEntries[`anomalous_${i}`] = {
-        type: 'line',
-        scaleID: 'x',
-        value: a.nav_date,
-        borderColor: 'rgba(239,68,68,0.7)',
-        borderWidth: 1,
-        borderDash: [4, 4],
-        label: {
-          content: `异常 ${a.unit_nav.toFixed(2)}`,
-          display: true,
-          position: 'start',
-          backgroundColor: 'rgba(239,68,68,0.8)',
-          color: '#fff',
-          font: { size: 10 },
-          padding: 2,
-        },
+    const lastDate = navItems[navItems.length - 1].nav_date
+    const yearStart = lastDate.slice(0, 4) + '-01-01'
+    const getVal = item => navType === 'unit' ? item.unit_nav : (item.accumulated_nav ?? item.unit_nav)
+    let firstVal = null
+    for (const item of navItems) {
+      if (item.nav_date >= yearStart) {
+        firstVal = getVal(item)
+        break
       }
-    })
-
-    fundIssues.gaps.forEach((g, i) => {
-      annotationEntries[`gap_${i}`] = {
-        type: 'box',
-        xScaleID: 'x',
-        xMin: g.from_date,
-        xMax: g.to_date,
-        backgroundColor: 'rgba(156,163,175,0.15)',
-        borderWidth: 0,
-        label: {
-          content: `断层 ${g.gap_days}天`,
-          display: true,
-          position: { x: 'center', y: 'start' },
-          backgroundColor: 'rgba(107,114,128,0.7)',
-          color: '#fff',
-          font: { size: 10 },
-          padding: 2,
-        },
-      }
-    })
-
-    return {
-      responsive: true,
-      maintainAspectRatio: false,
-      animation: { duration: 0 },
-      interaction: {
-        mode: 'index',
-        intersect: false,
-      },
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          callbacks: {
-            title: (items) => items[0]?.label || '',
-            label: (item) => `净值: ${Number(item.raw).toFixed(4)}`,
-          },
-        },
-        annotation: {
-          annotations: annotationEntries,
-        },
-      },
-      scales: {
-        x: {
-          grid: { display: false },
-          ticks: {
-            maxTicksLimit: 8,
-            maxRotation: 0,
-            font: { size: 11 },
-            color: '#9ca3af',
-          },
-        },
-        y: {
-          position: 'right',
-          grid: { color: '#f3f4f6' },
-          ticks: {
-            callback: (v) => Number(v).toFixed(4),
-            font: { size: 11 },
-            color: '#9ca3af',
-          },
-        },
-      },
-      onResize: (chart) => {
-        if (chart.chartArea) {
-          setGradient(createGradient(chart.ctx, chart.chartArea))
-        }
-      },
     }
-  }, [fundIssues])  // setGradient is stable; fundIssues drives annotations
+    if (!firstVal || firstVal <= 0) return null
+    const lastVal = getVal(navItems[navItems.length - 1])
+    return (lastVal - firstVal) / firstVal * 100
+  }, [navItems, navType])
 
-  // useCallback prevents a new function ref every render,
-  // which would otherwise trigger an infinite setGradient → re-render loop
-  const handleChartRef = useCallback((ref) => {
-    chartRef.current = ref
-    if (ref?.chartArea) {
-      setGradient(createGradient(ref.ctx, ref.chartArea))
+  const handleBenchmarkChange = useCallback((code) => {
+    setBenchmarkCode(code)
+    // Persist benchmark choice
+    if (fund) {
+      setFundBenchmark(fund.fund_id, code).catch(() => {})
     }
-  }, [])
+  }, [fund])
 
-  const handleNavSubmit = useCallback(async (e) => {
-    e.preventDefault()
-    if (!fund) return
-    setSubmitting(true)
-    setNavFormError('')
-    try {
-      await createNav({
-        product_code: fund.product_code,
-        nav_date: navForm.nav_date,
-        unit_nav: parseFloat(navForm.unit_nav),
-        accumulated_nav: navForm.accumulated_nav ? parseFloat(navForm.accumulated_nav) : null,
-      })
-      setShowNavForm(false)
-      setNavForm({ nav_date: '', unit_nav: '', accumulated_nav: '' })
-      setRetryCount(c => c + 1)
-    } catch (err) {
-      setNavFormError(err.message)
-    } finally {
-      setSubmitting(false)
-    }
-  }, [fund, navForm])
+  const onRetry = useCallback(() => setRetryCount(c => c + 1), [])
 
-  const handleDeleteNav = useCallback(async (navId) => {
-    if (!window.confirm('确认删除该手动录入记录？')) return
-    try {
-      await deleteNav(navId)
-      setRetryCount(c => c + 1)
-    } catch (err) {
-      console.error('delete nav failed', err)
-    }
-  }, [])
-
+  // ── Error state ──
   if (error) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
@@ -316,7 +237,7 @@ export default function FundDetail() {
             返回列表
           </button>
           <button
-            onClick={() => setRetryCount(c => c + 1)}
+            onClick={onRetry}
             className="mt-4 ml-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm hover:bg-gray-200"
           >
             重试
@@ -325,18 +246,6 @@ export default function FundDetail() {
       </div>
     )
   }
-
-  const weeklyColor = weeklyPct == null
-    ? 'text-gray-400'
-    : weeklyPct > 0
-    ? 'text-red-500'
-    : weeklyPct < 0
-    ? 'text-emerald-600'
-    : 'text-gray-500'
-
-  const weeklyLabel = weeklyPct == null
-    ? '—'
-    : `${weeklyPct > 0 ? '+' : ''}${weeklyPct.toFixed(2)}%`
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -358,260 +267,154 @@ export default function FundDetail() {
         </div>
       </header>
 
-      <main className="max-w-5xl mx-auto px-4 py-6 space-y-6">
-        {/* Stat cards */}
+      <main className="max-w-5xl mx-auto px-4 py-6 space-y-4">
+        {/* ── Hero area ── */}
         {loading ? (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            {Array.from({ length: 4 }, (_, i) => (
-              <div key={i} className="bg-white rounded-xl shadow p-4">
-                <div className="shimmer rounded h-3 w-16 mb-2" />
-                <div className="shimmer rounded h-6 w-24" />
+          <div className="bg-white rounded-xl shadow p-6">
+            <div className="flex gap-8">
+              <div className="shimmer rounded h-12 w-40" />
+              <div className="grid grid-cols-3 gap-6 flex-1">
+                {Array.from({ length: 6 }, (_, i) => (
+                  <div key={i}>
+                    <div className="shimmer rounded h-3 w-16 mb-2" />
+                    <div className="shimmer rounded h-5 w-20" />
+                  </div>
+                ))}
               </div>
-            ))}
+            </div>
           </div>
         ) : fund && (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <StatCard
-              label="最新净值"
-              value={fund.latest_nav != null ? fund.latest_nav.toFixed(4) : '—'}
-            />
-            <StatCard
-              label="近一周收益"
-              value={weeklyLabel}
-              valueClass={weeklyColor}
-            />
-            <StatCard
-              label="记录数"
-              value={fund.record_count.toLocaleString()}
-            />
-            <StatCard
-              label="数据区间"
-              value={fund.earliest_date && fund.latest_date
-                ? `${fund.earliest_date} ~ ${fund.latest_date}`
-                : '—'
-              }
-            />
+          <div className="bg-white rounded-xl shadow p-6">
+            <div className="flex flex-col md:flex-row gap-6">
+              {/* Left: large NAV */}
+              <div className="flex-shrink-0">
+                <p className="text-xs text-gray-500 mb-1">
+                  单位净值
+                  <span className="ml-2 text-gray-400">{fund.latest_date || ''}</span>
+                </p>
+                <p className="text-3xl font-bold text-gray-900 tracking-tight">
+                  {fund.latest_nav != null ? fund.latest_nav.toFixed(4) : '—'}
+                </p>
+                <p className="text-xs text-gray-400 mt-1">
+                  {fund.earliest_date && fund.latest_date
+                    ? `${fund.earliest_date} ~ ${fund.latest_date}  ·  ${fund.record_count} 条记录`
+                    : ''}
+                </p>
+              </div>
+
+              {/* Right: 6 core metrics */}
+              <div className="flex-1 grid grid-cols-3 md:grid-cols-6 gap-4 border-l border-gray-100 pl-6">
+                <HeroStat
+                  label="累计净值"
+                  value={navItems.length > 0 && navItems[navItems.length - 1].accumulated_nav != null
+                    ? navItems[navItems.length - 1].accumulated_nav.toFixed(4)
+                    : '—'}
+                />
+                <HeroStat
+                  label="成立以来收益"
+                  value={allMetrics ? formatPct(allMetrics.periodReturn) : '—'}
+                  valueClass={allMetrics ? formatPctColor(allMetrics.periodReturn) : ''}
+                />
+                <HeroStat
+                  label="今年以来收益"
+                  value={formatPct(ytdReturn)}
+                  valueClass={formatPctColor(ytdReturn)}
+                />
+                <HeroStat
+                  label="成立以来年化"
+                  value={allMetrics?.annualizedReturn != null ? formatPct(allMetrics.annualizedReturn) : '—'}
+                  valueClass={allMetrics ? formatPctColor(allMetrics.annualizedReturn) : ''}
+                />
+                <HeroStat
+                  label="最大回撤"
+                  value={allMetrics?.maxDrawdown != null ? `${allMetrics.maxDrawdown.toFixed(2)}%` : '—'}
+                  valueClass="text-red-500"
+                />
+                <HeroStat
+                  label="夏普比率"
+                  value={allMetrics?.sharpe != null ? allMetrics.sharpe.toFixed(3) : '—'}
+                  valueClass={allMetrics ? formatPctColor(allMetrics.sharpe) : ''}
+                />
+              </div>
+            </div>
           </div>
         )}
 
-        {/* Chart panel */}
-        <div className="bg-white rounded-xl shadow p-4">
-          {/* Controls */}
-          <div className="flex flex-wrap items-center gap-3 mb-4">
-            {/* Time range */}
-            <div className="flex gap-1 flex-wrap">
-              {RANGE_OPTIONS.map(opt => (
-                <button
-                  key={opt.days}
-                  onClick={() => setActiveDays(opt.days)}
-                  className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-                    activeDays === opt.days
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                  }`}
-                >
-                  {opt.label}
-                </button>
-              ))}
-            </div>
-
-            <div className="ml-auto flex items-center gap-2">
-              {/* Nav type toggle */}
-              {hasAccumulated && (
-                <div className="flex gap-1">
-                  <button
-                    onClick={() => setNavType('unit')}
-                    className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-                      navType === 'unit'
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                    }`}
-                  >
-                    单位净值
-                  </button>
-                  <button
-                    onClick={() => setNavType('accumulated')}
-                    className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-                      navType === 'accumulated'
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                    }`}
-                  >
-                    累计净值
-                  </button>
-                </div>
-              )}
-              {/* Manual entry button */}
-              {fund && (
-                <button
-                  onClick={() => setShowNavForm(true)}
-                  className="px-3 py-1 rounded-full text-xs font-medium bg-orange-50 text-orange-700 border border-orange-200 hover:bg-orange-100 transition-colors"
-                >
-                  + 手动录入
-                </button>
-              )}
-            </div>
+        {/* ── Tab navigation ── */}
+        <div className="bg-white rounded-xl shadow">
+          <div className="flex border-b border-gray-200">
+            {TABS.map(tab => (
+              <button
+                key={tab.key}
+                onClick={() => setActiveTab(tab.key)}
+                className={`px-6 py-3 text-sm font-medium transition-colors relative ${
+                  activeTab === tab.key
+                    ? 'text-blue-600'
+                    : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                {tab.label}
+                {activeTab === tab.key && (
+                  <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-blue-600 rounded-t" />
+                )}
+              </button>
+            ))}
           </div>
-
-          {/* Issue summary */}
-          {!loading && (fundIssues.anomalous.length > 0 || fundIssues.gaps.length > 0) && (
-            <div className="mb-3 flex flex-wrap gap-2 text-xs">
-              {fundIssues.anomalous.length > 0 && (
-                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-red-50 text-red-600 border border-red-200">
-                  <span className="w-2 h-2 rounded-full bg-red-400 inline-block" />
-                  {fundIssues.anomalous.length} 个异常净值（红色虚线标注）
-                </span>
-              )}
-              {fundIssues.gaps.length > 0 && (
-                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-gray-50 text-gray-600 border border-gray-200">
-                  <span className="w-2 h-2 rounded-full bg-gray-400 inline-block" />
-                  {fundIssues.gaps.length} 处日期断层（灰色区间标注）
-                </span>
-              )}
-            </div>
-          )}
-
-          {/* Chart */}
-          {loading ? (
-            <div className="shimmer rounded-lg h-72" />
-          ) : filteredItems.length === 0 ? (
-            <div className="h-72 flex items-center justify-center text-gray-400 text-sm">
-              暂无数据
-            </div>
-          ) : (
-            <div className="h-72">
-              <Line
-                ref={handleChartRef}
-                data={data}
-                options={options}
-              />
-            </div>
-          )}
-
-          {/* Data count note */}
-          {!loading && filteredItems.length > 0 && (
-            <p className="text-xs text-gray-400 mt-2 text-right">
-              显示 {filteredItems.length} 条记录
-            </p>
-          )}
         </div>
 
-        {/* Manual records list */}
-        {!loading && (() => {
-          const manualItems = navItems.filter(i => i.source_id === null)
-          if (manualItems.length === 0) return null
-          return (
-            <div className="bg-white rounded-xl shadow p-4">
-              <h3 className="text-sm font-semibold text-gray-700 mb-3">
-                手动录入记录
-                <span className="ml-2 text-xs font-normal text-orange-600">
-                  ● 橙色点标注于图表
-                </span>
-              </h3>
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="text-left text-gray-500 border-b border-gray-100">
-                    <th className="py-2">净值日期</th>
-                    <th className="py-2 text-right">单位净值</th>
-                    <th className="py-2 text-right">累计净值</th>
-                    <th className="py-2 text-right">操作</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {manualItems.map(item => (
-                    <tr key={item.id} className="border-b border-gray-50 hover:bg-gray-50">
-                      <td className="py-2 text-gray-600">{item.nav_date}</td>
-                      <td className="py-2 text-right font-mono text-gray-800">
-                        {item.unit_nav.toFixed(4)}
-                      </td>
-                      <td className="py-2 text-right font-mono text-gray-500">
-                        {item.accumulated_nav != null ? item.accumulated_nav.toFixed(4) : '—'}
-                      </td>
-                      <td className="py-2 text-right">
-                        <button
-                          onClick={() => handleDeleteNav(item.id)}
-                          className="text-red-400 hover:text-red-600"
-                        >
-                          删除
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )
-        })()}
+        {/* ── Tab content ── */}
+        {activeTab === 'chart' && (
+          <ChartTab
+            fund={fund}
+            navItems={navItems}
+            filteredItems={filteredItems}
+            fundIssues={fundIssues}
+            benchmarkCode={benchmarkCode}
+            setBenchmarkCode={handleBenchmarkChange}
+            benchmarkItems={benchmarkItems}
+            normalizedData={normalizedData}
+            navType={navType}
+            setNavType={setNavType}
+            hasAccumulated={hasAccumulated}
+            loading={loading}
+            onRetry={onRetry}
+            activeDays={activeDays}
+            setActiveDays={setActiveDays}
+            isCustomRange={isCustomRange}
+            setIsCustomRange={setIsCustomRange}
+            customFrom={customFrom}
+            setCustomFrom={setCustomFrom}
+            customTo={customTo}
+            setCustomTo={setCustomTo}
+          />
+        )}
 
-        {/* Manual entry modal */}
-        {showNavForm && (
-          <div
-            className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4"
-            onClick={() => { setShowNavForm(false); setNavForm({ nav_date: '', unit_nav: '', accumulated_nav: '' }); setNavFormError('') }}
-          >
-            <div
-              className="bg-white rounded-xl shadow-lg w-full max-w-sm p-6"
-              onClick={e => e.stopPropagation()}
-            >
-              <h3 className="text-base font-semibold text-gray-800 mb-4">手动录入净值</h3>
-              <form onSubmit={handleNavSubmit} className="space-y-4">
-                <div>
-                  <label className="block text-xs text-gray-600 mb-1">净值日期</label>
-                  <input
-                    type="date"
-                    value={navForm.nav_date}
-                    onChange={e => setNavForm(f => ({ ...f, nav_date: e.target.value }))}
-                    required
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-600 mb-1">单位净值</label>
-                  <input
-                    type="number"
-                    step="0.0001"
-                    min="0.0001"
-                    value={navForm.unit_nav}
-                    onChange={e => setNavForm(f => ({ ...f, unit_nav: e.target.value }))}
-                    required
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-600 mb-1">累计净值（可选）</label>
-                  <input
-                    type="number"
-                    step="0.0001"
-                    min="0.0001"
-                    value={navForm.accumulated_nav}
-                    onChange={e => setNavForm(f => ({ ...f, accumulated_nav: e.target.value }))}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                </div>
-                {navFormError && (
-                  <p className="text-xs text-red-500">{navFormError}</p>
-                )}
-                <div className="flex gap-2 justify-end pt-2">
-                  <button
-                    type="button"
-                    onClick={() => { setShowNavForm(false); setNavForm({ nav_date: '', unit_nav: '', accumulated_nav: '' }); setNavFormError('') }}
-                    className="px-4 py-2 text-sm text-gray-600 rounded-lg hover:bg-gray-100"
-                  >
-                    取消
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={submitting}
-                    className="px-4 py-2 text-sm bg-orange-500 text-white rounded-lg hover:bg-orange-600 disabled:opacity-50"
-                  >
-                    {submitting ? '提交中…' : '确认录入'}
-                  </button>
-                </div>
-              </form>
-            </div>
-          </div>
+        {activeTab === 'metrics' && (
+          <MetricsTab
+            filteredItems={filteredItems}
+            navType={navType}
+            benchmarkCode={benchmarkCode}
+            normalizedData={normalizedData}
+          />
+        )}
+
+        {activeTab === 'performance' && (
+          <PerformanceTab
+            navItems={navItems}
+            filteredItems={filteredItems}
+            navType={navType}
+          />
         )}
       </main>
+    </div>
+  )
+}
+
+function HeroStat({ label, value, valueClass }) {
+  return (
+    <div>
+      <p className="text-xs text-gray-500 mb-0.5 whitespace-nowrap">{label}</p>
+      <p className={`text-sm font-semibold font-mono ${valueClass || 'text-gray-900'}`}>{value}</p>
     </div>
   )
 }
