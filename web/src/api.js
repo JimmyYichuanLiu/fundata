@@ -214,6 +214,14 @@ export async function fetchFundReturns(opts = {}, signal) {
   return apiFetch(`/api/funds/returns${qs ? '?' + qs : ''}`, signal)
 }
 
+export async function fetchFundMetrics(opts = {}, signal) {
+  const params = new URLSearchParams()
+  if (opts.period) params.set('period', opts.period)
+  if (opts.tag_id != null) params.set('tag_id', opts.tag_id)
+  const qs = params.toString()
+  return apiFetch(`/api/funds/metrics/summary${qs ? '?' + qs : ''}`, signal)
+}
+
 export async function setFundBenchmark(fundId, benchmarkIndex) {
   const res = await fetch(`/api/funds/${fundId}/benchmark`, {
     method: 'PUT',

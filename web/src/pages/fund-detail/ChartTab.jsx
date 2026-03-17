@@ -13,6 +13,7 @@ import {
 import Annotation from 'chartjs-plugin-annotation'
 import { Line } from 'react-chartjs-2'
 import { subtractDays, createNav, deleteNav } from '../../api.js'
+import RangeScrubber from '../../components/RangeScrubber.jsx'
 
 ChartJS.register(
   CategoryScale, LinearScale, PointElement, LineElement,
@@ -82,12 +83,46 @@ export default function ChartTab({
 
   const isBenchmarkMode = !!(normalizedData && benchmarkCode)
 
+  // ── Scrubber: map filteredItems ↔ navItems indices ──
+  const allNavDates = useMemo(() => navItems.map(i => i.nav_date), [navItems])
+  const scrubberStart = useMemo(() => {
+    if (!filteredItems.length || !navItems.length) return 0
+    const first = filteredItems[0].nav_date
+    const idx = navItems.findIndex(i => i.nav_date >= first)
+    return Math.max(0, idx)
+  }, [filteredItems, navItems])
+  const scrubberEnd = useMemo(() => {
+    if (!filteredItems.length || !navItems.length) return navItems.length - 1
+    const last = filteredItems[filteredItems.length - 1].nav_date
+    let idx = navItems.length - 1
+    for (let i = navItems.length - 1; i >= 0; i--) {
+      if (navItems[i].nav_date <= last) { idx = i; break }
+    }
+    return idx
+  }, [filteredItems, navItems])
+
+  const handleScrubberChange = useCallback((startIdx, endIdx) => {
+    if (!navItems.length) return
+    setIsCustomRange(true)
+    setActiveDays(0)
+    setCustomFrom(navItems[startIdx]?.nav_date || '')
+    setCustomTo(navItems[endIdx]?.nav_date || '')
+  }, [navItems, setIsCustomRange, setActiveDays, setCustomFrom, setCustomTo])
+
   // ── Chart data ──
   const chartData = useMemo(() => {
     const labels = filteredItems.map(i => i.nav_date)
-    const values = filteredItems.map(i =>
-      navType === 'unit' ? i.unit_nav : (i.accumulated_nav ?? i.unit_nav)
-    )
+    let values
+    if (navType === 'return') {
+      const base = filteredItems.length > 0
+        ? (filteredItems[0].unit_nav || 1)
+        : 1
+      values = filteredItems.map(i => (i.unit_nav / base))
+    } else {
+      values = filteredItems.map(i =>
+        navType === 'unit' ? i.unit_nav : (i.accumulated_nav ?? i.unit_nav)
+      )
+    }
     return { labels, values }
   }, [filteredItems, navType])
 
@@ -267,7 +302,19 @@ export default function ChartTab({
           callbacks: {
             title: (items) => items[0]?.label || '',
             label: (item) => {
-              if (isBenchmarkMode) return `${item.dataset.label}: ${Number(item.raw).toFixed(2)}`
+              if (isBenchmarkMode) {
+                const v = Number(item.raw)
+                if (navType === 'return') {
+                  const sign = v >= 1 ? '+' : ''
+                  return `${item.dataset.label}: ${sign}${((v - 1) * 100).toFixed(2)}%`
+                }
+                return `${item.dataset.label}: ${v.toFixed(2)}`
+              }
+              if (navType === 'return') {
+                const v = Number(item.raw)
+                const sign = v >= 1 ? '+' : ''
+                return `收益率: ${sign}${((v - 1) * 100).toFixed(2)}%`
+              }
               return `净值: ${Number(item.raw).toFixed(4)}`
             },
           },
@@ -283,7 +330,13 @@ export default function ChartTab({
           position: 'right',
           grid: { color: '#f3f4f6' },
           ticks: {
-            callback: v => isBenchmarkMode ? Number(v).toFixed(2) : Number(v).toFixed(4),
+            callback: v => {
+              if (navType === 'return') {
+                const pct = (Number(v) - 1) * 100
+                return (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%'
+              }
+              return isBenchmarkMode ? Number(v).toFixed(2) : Number(v).toFixed(4)
+            },
             font: { size: 11 },
             color: '#9ca3af',
           },
@@ -293,7 +346,7 @@ export default function ChartTab({
         if (chart.chartArea) setGradient(createGradient(chart.ctx, chart.chartArea))
       },
     }
-  }, [fundIssues, isBenchmarkMode])
+  }, [fundIssues, isBenchmarkMode, navType])
 
   const handleChartRef = useCallback((ref) => {
     chartRef.current = ref
@@ -353,7 +406,9 @@ export default function ChartTab({
             ))}
           </select>
           {isBenchmarkMode && (
-            <span className="text-xs text-gray-400 ml-1">（净值基数=100，已归一化）</span>
+            <span className="text-xs text-gray-400 ml-1">
+              {navType === 'return' ? '（收益率，以1为基准）' : '（净值基数=100，已归一化）'}
+            </span>
           )}
         </div>
 
@@ -386,16 +441,16 @@ export default function ChartTab({
           </div>
 
           <div className="ml-auto flex items-center gap-2">
-            {hasAccumulated && (
-              <div className="flex gap-1">
-                <button
-                  onClick={() => setNavType('unit')}
-                  className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-                    navType === 'unit' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                  }`}
-                >
-                  单位净值
-                </button>
+            <div className="flex gap-1">
+              <button
+                onClick={() => setNavType('unit')}
+                className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                  navType === 'unit' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                }`}
+              >
+                单位净值
+              </button>
+              {hasAccumulated && (
                 <button
                   onClick={() => setNavType('accumulated')}
                   className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
@@ -404,8 +459,16 @@ export default function ChartTab({
                 >
                   累计净值
                 </button>
-              </div>
-            )}
+              )}
+              <button
+                onClick={() => setNavType('return')}
+                className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                  navType === 'return' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                }`}
+              >
+                收益率
+              </button>
+            </div>
             {fund && (
               <button
                 onClick={() => setShowNavForm(true)}
@@ -473,6 +536,16 @@ export default function ChartTab({
               <span className="ml-2">· 基准: {BENCHMARK_OPTIONS.find(o => o.code === benchmarkCode)?.label}</span>
             )}
           </p>
+        )}
+
+        {/* Range scrubber — only when there's enough full history to scroll */}
+        {!loading && allNavDates.length > 1 && (
+          <RangeScrubber
+            dates={allNavDates}
+            startIdx={scrubberStart}
+            endIdx={scrubberEnd}
+            onChange={handleScrubberChange}
+          />
         )}
       </div>
 

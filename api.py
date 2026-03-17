@@ -50,6 +50,11 @@ FUTURES_TO_INDEX = {
 # Quarterly delivery months for CFFEX stock-index futures
 _QUARTERLY_MONTHS = {3, 6, 9, 12}
 
+# Roll "当季" label to the next contract when remaining calendar days < this threshold.
+# Near expiry the annualised-basis formula amplifies small moves (factor = 365/remaining_days),
+# so we advance the label window ~3 weeks before expiry to keep the chart stable.
+BASIS_ROLL_THRESHOLD = 21
+
 
 def _third_friday(year: int, month: int) -> _date:
     """Third Friday of year/month — CFFEX stock-index futures expiry day."""
@@ -873,6 +878,151 @@ def get_fund_returns(
     return {"items": items}
 
 
+# --- Fund metrics summary ---------------------------------------------------
+
+def _compute_fund_metrics(series: list) -> dict:
+    """Compute key performance metrics for a NAV series.
+
+    series: sorted list of (yyyymmdd_str, nav_float) tuples.
+    Returns a dict with annualized_return, annualized_vol, max_drawdown, sharpe, monthly_win_rate.
+    """
+    import math as _math
+    import datetime as _dt_module
+
+    if len(series) < 2:
+        return {}
+
+    dates = [s[0] for s in series]
+    vals = [s[1] for s in series]
+    if vals[0] <= 0:
+        return {}
+
+    try:
+        d0 = _dt_module.date(int(dates[0][:4]), int(dates[0][4:6]), int(dates[0][6:8]))
+        d1 = _dt_module.date(int(dates[-1][:4]), int(dates[-1][4:6]), int(dates[-1][6:8]))
+        total_days = max(1, (d1 - d0).days)
+    except Exception:
+        total_days = len(series)
+
+    # Annualized return (compound)
+    period_ret = (vals[-1] - vals[0]) / vals[0]
+    ann_ret = None
+    if total_days >= 30:
+        ann_ret = (_math.pow(1 + period_ret, 365 / total_days) - 1) * 100
+
+    # Daily returns
+    daily_rets = [
+        (vals[i] - vals[i - 1]) / vals[i - 1]
+        for i in range(1, len(vals))
+        if vals[i - 1] > 0
+    ]
+
+    # Annualized volatility (std dev of daily returns × √250)
+    ann_vol = None
+    if len(daily_rets) > 1:
+        n = len(daily_rets)
+        mu = sum(daily_rets) / n
+        var = sum((r - mu) ** 2 for r in daily_rets) / (n - 1)
+        ann_vol = _math.sqrt(var * 250) * 100
+
+    # Max drawdown (peak-to-trough, %)
+    peak = vals[0]
+    max_dd = 0.0
+    for v in vals[1:]:
+        if v > peak:
+            peak = v
+        if peak > 0:
+            dd = (v - peak) / peak
+            if dd < max_dd:
+                max_dd = dd
+    max_dd_pct = max_dd * 100  # negative number
+
+    # Sharpe (risk-free = 2.5% p.a.)
+    sharpe = None
+    if ann_ret is not None and ann_vol is not None and ann_vol > 0:
+        sharpe = (ann_ret - 2.5) / ann_vol
+
+    # Monthly win rate: count months with positive first→last return
+    monthly_rets = []
+    month_start_idx = 0
+    for i in range(1, len(dates)):
+        if dates[i][:6] != dates[i - 1][:6]:
+            start_nav = vals[month_start_idx]
+            end_nav = vals[i - 1]
+            if start_nav > 0:
+                monthly_rets.append((end_nav - start_nav) / start_nav)
+            month_start_idx = i
+    # Include last (possibly incomplete) month
+    if month_start_idx < len(vals) - 1:
+        start_nav = vals[month_start_idx]
+        end_nav = vals[-1]
+        if start_nav > 0:
+            monthly_rets.append((end_nav - start_nav) / start_nav)
+
+    monthly_win_rate = None
+    if monthly_rets:
+        monthly_win_rate = sum(1 for r in monthly_rets if r > 0) / len(monthly_rets) * 100
+
+    return {
+        "annualized_return": round(ann_ret, 4) if ann_ret is not None else None,
+        "annualized_vol": round(ann_vol, 4) if ann_vol is not None else None,
+        "max_drawdown": round(max_dd_pct, 4),
+        "sharpe": round(sharpe, 4) if sharpe is not None else None,
+        "monthly_win_rate": round(monthly_win_rate, 2) if monthly_win_rate is not None else None,
+        "period_days": total_days,
+    }
+
+
+@app.get("/api/funds/metrics/summary", tags=["funds"])
+def get_fund_metrics_summary(
+    period: str = Query("all", description="Lookback period: all | 1y | 3y"),
+    tag_id: Optional[int] = Query(None),
+    conn: sqlite3.Connection = Depends(get_db),
+):
+    """Per-fund performance metrics: annualised return/vol, max drawdown, Sharpe, monthly win rate."""
+    import datetime as _dt_mod
+
+    days_map = {"1y": 365, "3y": 1095}
+    max_days = days_map.get(period, 99999)
+
+    today = _dt_mod.date.today()
+    if max_days < 99999:
+        cutoff = (today - _dt_mod.timedelta(days=max_days + 30)).strftime("%Y%m%d")
+    else:
+        cutoff = "19000101"
+
+    tag_filter = ""
+    tag_params: list = []
+    if tag_id is not None:
+        tag_filter = " AND n.fund_id IN (SELECT fund_id FROM fund_tag_assignments WHERE tag_id=?)"
+        tag_params = [tag_id]
+
+    rows = conn.execute(
+        f"""
+        SELECT n.fund_id, n.净值日期 AS nav_date, n.单位净值 AS unit_nav
+        FROM fund_nav_data n
+        WHERE n.净值日期 >= ?
+          AND n.单位净值 IS NOT NULL
+          AND n.单位净值 > 0
+          AND n.单位净值 <= 5
+          {tag_filter}
+        ORDER BY n.fund_id, n.净值日期
+        """,
+        [cutoff] + tag_params,
+    ).fetchall()
+
+    from collections import defaultdict as _dd
+    fund_data: dict = _dd(list)
+    for r in rows:
+        fund_data[r["fund_id"]].append((r["nav_date"], float(r["unit_nav"])))
+
+    result = {}
+    for fid, series in fund_data.items():
+        result[fid] = _compute_fund_metrics(series)
+
+    return {"period": period, "items": result}
+
+
 # --- Set fund benchmark ----------------------------------------------------
 
 class BenchmarkUpdateRequest(BaseModel):
@@ -1489,15 +1639,21 @@ def get_basis_quarterly(
             })
         contracts.sort(key=lambda x: x["expiry"])
 
+        # Roll threshold: if nearest contract is too close to expiry, advance label window
+        # to avoid large annualised-basis spikes (e.g. the recurring ~10th-of-month anomaly).
+        label_start = 0
+        if len(contracts) >= 2 and contracts[0]["remaining_days"] < BASIS_ROLL_THRESHOLD:
+            label_start = 1
         for i, label in enumerate(["当季", "下季"]):
-            if i >= len(contracts):
+            idx = label_start + i
+            if idx >= len(contracts):
                 break
-            c = contracts[i]
+            c = contracts[idx]
             fc = c["futures_close"]
             ic = index_close
             basis = round(ic - fc, 4) if ic is not None and fc is not None else None
             ann_basis = None
-            if basis is not None and fc and c["remaining_days"] >= 7:
+            if basis is not None and fc and c["remaining_days"] >= 10:
                 ann_basis = round(basis / fc / c["remaining_days"] * 365 * 100, 4)
             items.append({
                 "trade_date": trade_date,
@@ -1544,8 +1700,9 @@ def get_basis_today(
     """, (index_ts_code, symbol, latest_date)).fetchall()
 
     today_obj = _date(int(latest_date[:4]), int(latest_date[4:6]), int(latest_date[6:8]))
-    items = []
-    active_count = 0
+
+    # Collect all active contracts first, then apply roll-threshold labelling
+    all_contracts = []
     for r in rows:
         ts = r["ts_code"]
         try:
@@ -1561,19 +1718,39 @@ def get_basis_today(
         ic = r["index_close"]
         basis = round(ic - fc, 4) if ic is not None and fc is not None else None
         ann_basis = None
-        if basis is not None and fc and remaining >= 7:
+        if basis is not None and fc and remaining >= 10:
             ann_basis = round(basis / fc / remaining * 365 * 100, 4)
-        active_count += 1
-        label = ["当季", "下季", "隔季"][min(active_count - 1, 2)]
-        items.append({
+        all_contracts.append({
             "ts_code": ts,
-            "contract_type": label,
-            "expiry_date": expiry.strftime("%Y%m%d"),
+            "expiry": expiry,
             "remaining_days": remaining,
             "futures_close": fc,
             "index_close": ic,
             "basis": basis,
             "annualized_basis_pct": ann_basis,
+        })
+
+    # Apply roll threshold: if nearest contract is within BASIS_ROLL_THRESHOLD days,
+    # advance label window (下季→当季) to suppress amplified near-expiry basis spikes.
+    label_start = 0
+    if len(all_contracts) >= 2 and all_contracts[0]["remaining_days"] < BASIS_ROLL_THRESHOLD:
+        label_start = 1
+
+    items = []
+    for i, label in enumerate(["当季", "下季", "隔季"]):
+        idx = label_start + i
+        if idx >= len(all_contracts):
+            break
+        c = all_contracts[idx]
+        items.append({
+            "ts_code": c["ts_code"],
+            "contract_type": label,
+            "expiry_date": c["expiry"].strftime("%Y%m%d"),
+            "remaining_days": c["remaining_days"],
+            "futures_close": c["futures_close"],
+            "index_close": c["index_close"],
+            "basis": c["basis"],
+            "annualized_basis_pct": c["annualized_basis_pct"],
         })
 
     return {"symbol": symbol, "trade_date": latest_date, "items": items}

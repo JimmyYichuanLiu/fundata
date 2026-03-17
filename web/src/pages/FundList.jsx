@@ -1,8 +1,8 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   fetchStats, fetchFunds, fetchAllIssues,
-  fetchSyncStatus, triggerSync, fetchFailures, fetchFundReturns,
+  fetchSyncStatus, triggerSync, fetchFailures, fetchFundReturns, fetchFundMetrics,
   fetchTags, createTag, deleteTag, assignTag, removeTag,
 } from '../api.js'
 
@@ -12,6 +12,38 @@ const TAG_COLORS = [
 ]
 
 const PAGE_SIZE = 20
+
+// ── Optional column definitions ──
+const COLUMN_DEFS = [
+  { key: 'sparkline',          label: '走势',     defaultVisible: true,  category: 'return',  sortable: false },
+  { key: '1w',                 label: '近一周',   defaultVisible: true,  category: 'return',  sortable: true },
+  { key: '1m',                 label: '近一月',   defaultVisible: true,  category: 'return',  sortable: true },
+  { key: '3m',                 label: '近三月',   defaultVisible: true,  category: 'return',  sortable: true },
+  { key: '6m',                 label: '近六月',   defaultVisible: false, category: 'return',  sortable: true },
+  { key: '1y',                 label: '近一年',   defaultVisible: false, category: 'return',  sortable: true },
+  { key: 'ytd',                label: '年初至今', defaultVisible: false, category: 'return',  sortable: true },
+  { key: 'annualized_return',  label: '年化收益', defaultVisible: false, category: 'metrics', sortable: true },
+  { key: 'max_drawdown',       label: '最大回撤', defaultVisible: false, category: 'metrics', sortable: true },
+  { key: 'annualized_vol',     label: '年化波动', defaultVisible: false, category: 'metrics', sortable: true },
+  { key: 'sharpe',             label: '夏普比率', defaultVisible: false, category: 'metrics', sortable: true },
+  { key: 'monthly_win_rate',   label: '月胜率',   defaultVisible: false, category: 'metrics', sortable: true },
+]
+
+const DEFAULT_VISIBLE = new Set(COLUMN_DEFS.filter(c => c.defaultVisible).map(c => c.key))
+const METRICS_KEYS = new Set(COLUMN_DEFS.filter(c => c.category === 'metrics').map(c => c.key))
+const RETURN_PERIOD_KEYS = ['1w', '1m', '3m', '6m', '1y', 'ytd']
+
+function loadVisibleCols() {
+  try {
+    const raw = localStorage.getItem('fundlist_visible_cols')
+    if (raw) return new Set(JSON.parse(raw))
+  } catch {}
+  return new Set(DEFAULT_VISIBLE)
+}
+
+function saveVisibleCols(set) {
+  try { localStorage.setItem('fundlist_visible_cols', JSON.stringify([...set])) } catch {}
+}
 
 function tagColor(tagId) {
   return TAG_COLORS[tagId % TAG_COLORS.length]
@@ -64,6 +96,27 @@ function Sparkline({ data, width = 80, height = 24 }) {
       />
     </svg>
   )
+}
+
+// ── Sort indicator ──
+function SortIcon({ active, dir }) {
+  if (!active) return <span className="text-slate-300 text-xs ml-0.5">↕</span>
+  return <span className="text-primary text-xs ml-0.5">{dir === 'asc' ? '↑' : '↓'}</span>
+}
+
+// ── Metric value cell ──
+function MetricCell({ val, format }) {
+  if (val == null) return <span className="text-slate-300 text-sm">—</span>
+  if (format === 'pct') {
+    const color = val > 0 ? 'text-emerald-500' : val < 0 ? 'text-rose-500' : 'text-slate-400'
+    const sign = val > 0 ? '+' : ''
+    return <span className={`font-medium text-sm ${color}`}>{sign}{val.toFixed(2)}%</span>
+  }
+  if (format === 'ratio') {
+    const color = val > 0 ? 'text-emerald-500' : val < 0 ? 'text-rose-500' : 'text-slate-400'
+    return <span className={`font-medium text-sm ${color}`}>{val.toFixed(3)}</span>
+  }
+  return <span className="text-sm">{val}</span>
 }
 
 function buildTooltip(issue) {
@@ -147,6 +200,14 @@ export default function FundList() {
 
   const syncPollRef = useRef(null)
 
+  // ── Sort + column visibility state ──
+  const [sortKey, setSortKey] = useState('latest_date')
+  const [sortDir, setSortDir] = useState('desc')
+  const [visibleCols, setVisibleCols] = useState(loadVisibleCols)
+  const [showColPicker, setShowColPicker] = useState(false)
+  const [fundMetrics, setFundMetrics] = useState({})
+  const colPickerRef = useRef(null)
+
   // ── Load tags ──
   const loadTags = useCallback(() => {
     fetchTags().then(data => setAllTags(data.items || [])).catch(() => {})
@@ -172,8 +233,10 @@ export default function FundList() {
         setLoading(false)
       })
 
+    const neededPeriods = RETURN_PERIOD_KEYS.filter(k => visibleCols.has(k))
+    const periodsStr = neededPeriods.length > 0 ? neededPeriods.join(',') : '1w,1m,3m'
     fetchFundReturns(
-      { periods: '1w,1m,3m,6m', tag_id: activeTagId },
+      { periods: periodsStr, tag_id: activeTagId },
       signal,
     )
       .then(data => setFundReturns(data.items || {}))
@@ -198,7 +261,28 @@ export default function FundList() {
       .catch(err => { if (err.name !== 'AbortError') console.warn('failures load failed', err) })
 
     return () => controller.abort()
-  }, [retryCount, activeTagId])
+  }, [retryCount, activeTagId, visibleCols])
+
+  // ── Fetch metrics when any metrics column is visible ──
+  useEffect(() => {
+    const needsMetrics = COLUMN_DEFS.some(c => c.category === 'metrics' && visibleCols.has(c.key))
+    if (!needsMetrics) return
+    const controller = new AbortController()
+    fetchFundMetrics({ period: 'all', tag_id: activeTagId }, controller.signal)
+      .then(data => setFundMetrics(data.items || {}))
+      .catch(err => { if (err.name !== 'AbortError') console.warn('metrics load failed', err) })
+    return () => controller.abort()
+  }, [visibleCols, activeTagId])
+
+  // ── Close col picker on outside click ──
+  useEffect(() => {
+    if (!showColPicker) return
+    function handler(e) {
+      if (colPickerRef.current && !colPickerRef.current.contains(e.target)) setShowColPicker(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [showColPicker])
 
   useEffect(() => { loadTags() }, [loadTags])
 
@@ -321,13 +405,79 @@ export default function FundList() {
     setTagAssigner(prev => prev?.fundId === fundId ? null : { fundId })
   }, [])
 
-  // ── Filtered & paginated data ──
-  const filtered = debouncedSearch
-    ? funds.filter(f =>
-        (f.product_name || '').includes(debouncedSearch) ||
-        (f.product_code || '').includes(debouncedSearch)
-      )
-    : funds
+  // ── Sort handler ──
+  const handleSort = useCallback((key) => {
+    setSortKey(prev => {
+      if (prev === key) {
+        setSortDir(d => d === 'asc' ? 'desc' : 'asc')
+        return key
+      }
+      setSortDir('desc')
+      return key
+    })
+    setPage(1)
+  }, [])
+
+  // ── Column visibility toggle ──
+  const toggleCol = useCallback((key) => {
+    setVisibleCols(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      saveVisibleCols(next)
+      return next
+    })
+  }, [])
+
+  // ── Filtered & sorted & paginated data ──
+  const filtered = useMemo(() => {
+    const base = debouncedSearch
+      ? funds.filter(f =>
+          (f.product_name || '').includes(debouncedSearch) ||
+          (f.product_code || '').includes(debouncedSearch)
+        )
+      : funds
+    return [...base].sort((a, b) => {
+      const ret_a = fundReturns[a.fund_id]
+      const ret_b = fundReturns[b.fund_id]
+      const met_a = fundMetrics[a.fund_id]
+      const met_b = fundMetrics[b.fund_id]
+
+      if (sortKey === 'latest_date') {
+        const dc = (b.latest_date || '').localeCompare(a.latest_date || '')
+        if (dc !== 0) return dc
+        return (a.product_name || '').localeCompare(b.product_name || '', 'zh')
+      }
+      if (sortKey === 'product_name') {
+        const cmp = (a.product_name || '').localeCompare(b.product_name || '', 'zh')
+        return sortDir === 'asc' ? cmp : -cmp
+      }
+      if (sortKey === 'latest_nav') {
+        const va = a.latest_nav ?? null, vb = b.latest_nav ?? null
+        if (va === null && vb === null) return 0
+        if (va === null) return 1
+        if (vb === null) return -1
+        return sortDir === 'asc' ? va - vb : vb - va
+      }
+      // Return period keys
+      if (RETURN_PERIOD_KEYS.includes(sortKey)) {
+        const va = ret_a?.[sortKey] ?? null, vb = ret_b?.[sortKey] ?? null
+        if (va === null && vb === null) return 0
+        if (va === null) return 1
+        if (vb === null) return -1
+        return sortDir === 'asc' ? va - vb : vb - va
+      }
+      // Metrics keys
+      if (METRICS_KEYS.has(sortKey)) {
+        const va = met_a?.[sortKey] ?? null, vb = met_b?.[sortKey] ?? null
+        if (va === null && vb === null) return 0
+        if (va === null) return 1
+        if (vb === null) return -1
+        return sortDir === 'asc' ? va - vb : vb - va
+      }
+      return 0
+    })
+  }, [funds, debouncedSearch, sortKey, sortDir, fundReturns, fundMetrics])
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
   const currentPage = Math.min(page, totalPages)
@@ -529,6 +679,39 @@ export default function FundList() {
                 className="pl-10 pr-4 py-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-sm focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none w-full md:w-64 transition-all"
               />
             </div>
+            {/* Column visibility picker */}
+            <div className="relative" ref={colPickerRef}>
+              <button
+                onClick={() => setShowColPicker(v => !v)}
+                className={`w-9 h-9 flex items-center justify-center rounded-lg border transition-colors ${showColPicker ? 'bg-primary text-white border-primary' : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500 hover:text-primary'}`}
+                title="显示/隐藏列"
+              >
+                <span className="material-symbols-outlined text-[18px]">view_column</span>
+              </button>
+              {showColPicker && (
+                <div className="absolute right-0 top-10 z-50 bg-white dark:bg-slate-900 rounded-xl shadow-xl border border-slate-200 dark:border-slate-700 p-3 w-52">
+                  <p className="text-xs font-semibold text-slate-500 mb-2 uppercase tracking-wider">可见列</p>
+                  <div className="space-y-0.5">
+                    {['return', 'metrics'].map(cat => (
+                      <div key={cat}>
+                        <p className="text-[10px] font-medium text-slate-400 mt-2 mb-1 uppercase">{cat === 'return' ? '收益率' : '业绩指标'}</p>
+                        {COLUMN_DEFS.filter(c => c.category === cat).map(col => (
+                          <label key={col.key} className="flex items-center gap-2 px-1 py-1 rounded cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800">
+                            <input
+                              type="checkbox"
+                              checked={visibleCols.has(col.key)}
+                              onChange={() => toggleCol(col.key)}
+                              className="w-3.5 h-3.5 accent-primary"
+                            />
+                            <span className="text-xs text-slate-700 dark:text-slate-200">{col.label}</span>
+                          </label>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
@@ -589,14 +772,34 @@ export default function FundList() {
               <thead>
                 <tr className="bg-slate-50 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-800">
                   <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider w-12">#</th>
-                  <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider min-w-[260px]">基金名称</th>
+                  <th
+                    className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider min-w-[260px] cursor-pointer select-none hover:text-primary"
+                    onClick={() => handleSort('product_name')}
+                  >
+                    基金名称 <SortIcon active={sortKey === 'product_name'} dir={sortDir} />
+                  </th>
                   <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider">代码</th>
-                  <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider">最新净值</th>
-                  <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider">净值日期</th>
-                  <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">近一周</th>
-                  <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">近一月</th>
-                  <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">近三月</th>
-                  <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider text-center">走势</th>
+                  <th
+                    className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider cursor-pointer select-none hover:text-primary"
+                    onClick={() => handleSort('latest_nav')}
+                  >
+                    最新净值 <SortIcon active={sortKey === 'latest_nav'} dir={sortDir} />
+                  </th>
+                  <th
+                    className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider cursor-pointer select-none hover:text-primary"
+                    onClick={() => handleSort('latest_date')}
+                  >
+                    净值日期 <SortIcon active={sortKey === 'latest_date'} dir={sortDir} />
+                  </th>
+                  {COLUMN_DEFS.filter(c => visibleCols.has(c.key)).map(col => (
+                    <th
+                      key={col.key}
+                      className={`px-6 py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider ${col.key === 'sparkline' ? 'text-center' : 'text-right'} ${col.sortable ? 'cursor-pointer select-none hover:text-primary' : ''}`}
+                      onClick={col.sortable ? () => handleSort(col.key) : undefined}
+                    >
+                      {col.label}{col.sortable && <SortIcon active={sortKey === col.key} dir={sortDir} />}
+                    </th>
+                  ))}
                   <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider text-center">状态</th>
                   <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">操作</th>
                 </tr>
@@ -611,7 +814,6 @@ export default function FundList() {
                         : 0
                       const hasIssue = fundIssueCount > 0
                       const isAssigning = tagAssigner?.fundId === fund.fund_id
-                      const ret = fundReturns[fund.fund_id]
                       const globalIdx = pageStart + idx
 
                       return (
@@ -674,18 +876,27 @@ export default function FundList() {
                           <td className="px-6 py-4 text-sm text-slate-500">
                             {fund.latest_date || '—'}
                           </td>
-                          <td className="px-6 py-4 text-right">
-                            <PctCell pct={ret?.['1w']} />
-                          </td>
-                          <td className="px-6 py-4 text-right">
-                            <PctCell pct={ret?.['1m']} />
-                          </td>
-                          <td className="px-6 py-4 text-right">
-                            <PctCell pct={ret?.['3m']} />
-                          </td>
-                          <td className="px-6 py-4 text-center">
-                            <Sparkline data={ret?.sparkline} />
-                          </td>
+                          {COLUMN_DEFS.filter(c => visibleCols.has(c.key)).map(col => {
+                            const ret = fundReturns[fund.fund_id]
+                            const met = fundMetrics[fund.fund_id]
+                            if (col.key === 'sparkline') return (
+                              <td key="sparkline" className="px-6 py-4 text-center">
+                                <Sparkline data={ret?.sparkline} />
+                              </td>
+                            )
+                            if (col.key === '1w') return <td key="1w" className="px-6 py-4 text-right"><PctCell pct={ret?.['1w']} /></td>
+                            if (col.key === '1m') return <td key="1m" className="px-6 py-4 text-right"><PctCell pct={ret?.['1m']} /></td>
+                            if (col.key === '3m') return <td key="3m" className="px-6 py-4 text-right"><PctCell pct={ret?.['3m']} /></td>
+                            if (col.key === '6m') return <td key="6m" className="px-6 py-4 text-right"><PctCell pct={ret?.['6m']} /></td>
+                            if (col.key === '1y') return <td key="1y" className="px-6 py-4 text-right"><PctCell pct={ret?.['1y']} /></td>
+                            if (col.key === 'ytd') return <td key="ytd" className="px-6 py-4 text-right"><PctCell pct={ret?.['ytd']} /></td>
+                            if (col.key === 'annualized_return') return <td key="annualized_return" className="px-6 py-4 text-right"><MetricCell val={met?.annualized_return} format="pct" /></td>
+                            if (col.key === 'max_drawdown') return <td key="max_drawdown" className="px-6 py-4 text-right"><MetricCell val={met?.max_drawdown} format="pct" /></td>
+                            if (col.key === 'annualized_vol') return <td key="annualized_vol" className="px-6 py-4 text-right"><MetricCell val={met?.annualized_vol} format="pct" /></td>
+                            if (col.key === 'sharpe') return <td key="sharpe" className="px-6 py-4 text-right"><MetricCell val={met?.sharpe} format="ratio" /></td>
+                            if (col.key === 'monthly_win_rate') return <td key="monthly_win_rate" className="px-6 py-4 text-right"><MetricCell val={met?.monthly_win_rate} format="pct" /></td>
+                            return null
+                          })}
                           <td className="px-6 py-4 text-center">
                             {hasIssue ? (
                               <span
@@ -715,7 +926,7 @@ export default function FundList() {
                 }
                 {!loading && filtered.length === 0 && (
                   <tr>
-                    <td colSpan={11} className="px-6 py-12 text-center text-slate-400">
+                    <td colSpan={5 + visibleCols.size + 2} className="px-6 py-12 text-center text-slate-400">
                       {error ? '请点击上方"重试"按钮重新加载' : '没有匹配的基金'}
                     </td>
                   </tr>

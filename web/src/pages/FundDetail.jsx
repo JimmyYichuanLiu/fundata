@@ -134,7 +134,9 @@ export default function FundDetail() {
   const normalizedData = useMemo(() => {
     if (!benchmarkCode || benchmarkItems.length === 0 || filteredItems.length === 0) return null
 
-    const getVal = item => navType === 'unit' ? item.unit_nav : (item.accumulated_nav ?? item.unit_nav)
+    const getVal = item => navType === 'unit' || navType === 'return'
+      ? item.unit_nav
+      : (item.accumulated_nav ?? item.unit_nav)
     const sortedBench = [...benchmarkItems].sort((a, b) => a.trade_date.localeCompare(b.trade_date))
 
     let benchIdx = 0
@@ -159,6 +161,9 @@ export default function FundDetail() {
     const baseBenchVal = firstBenchClose
     if (!baseFundVal || !baseBenchVal) return null
 
+    // normalizeBase: 1 in return mode, 100 otherwise (归一到1 vs 归一到100)
+    const normalizeBase = navType === 'return' ? 1 : 100
+
     const labels = []
     const fundNorm = []
     const benchNorm = []
@@ -178,8 +183,8 @@ export default function FundDetail() {
       }
 
       labels.push(item.nav_date)
-      fundNorm.push(getVal(item) / baseFundVal * 100)
-      benchNorm.push(lastBenchClose != null ? lastBenchClose / baseBenchVal * 100 : null)
+      fundNorm.push(getVal(item) / baseFundVal * normalizeBase)
+      benchNorm.push(lastBenchClose != null ? lastBenchClose / baseBenchVal * normalizeBase : null)
     }
 
     return { labels, fundNorm, benchNorm }

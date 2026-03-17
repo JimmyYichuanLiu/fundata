@@ -11,6 +11,7 @@ import {
 } from 'chart.js'
 import { Line } from 'react-chartjs-2'
 import { fetchQuarterlyBasis, fetchBasisToday } from '../api.js'
+import RangeScrubber from '../components/RangeScrubber.jsx'
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend)
 
@@ -82,6 +83,10 @@ export default function BasisAnalysis() {
   const [customFrom, setCustomFrom] = useState('')
   const [customTo, setCustomTo] = useState('')
 
+  // Scrubber state: indices into allDates for the visible window
+  const [scrubStart, setScrubStart] = useState(0)
+  const [scrubEnd, setScrubEnd] = useState(0)
+
   const symbolMeta = SYMBOLS.find(s => s.symbol === activeSymbol)
 
   // Compute date_from / date_to based on range selection
@@ -142,17 +147,26 @@ export default function BasisAnalysis() {
     return Array.from(set).sort()
   }, [basisItems])
 
+  // Reset scrubber to full range when data reloads
+  useEffect(() => {
+    setScrubStart(0)
+    setScrubEnd(Math.max(0, allDates.length - 1))
+  }, [allDates])
+
+  // Scrubber-visible slice of allDates
+  const visibleDates = useMemo(() => allDates.slice(scrubStart, scrubEnd + 1), [allDates, scrubStart, scrubEnd])
+
   // Chart datasets: annualized_basis_pct for 当季 and 下季
   const chartData = useMemo(() => {
     const makeMap = series => new Map(series.map(i => [i.trade_date, i.annualized_basis_pct]))
     const curMap = makeMap(currentSeries)
     const nxtMap = makeMap(nextSeries)
     return {
-      labels: allDates.map(dbDateToDisplay),
+      labels: visibleDates.map(dbDateToDisplay),
       datasets: [
         {
           label: '当季年化基差%',
-          data: allDates.map(d => curMap.get(d) ?? null),
+          data: visibleDates.map(d => curMap.get(d) ?? null),
           borderColor: '#3b82f6',
           backgroundColor: 'transparent',
           fill: false,
@@ -164,7 +178,7 @@ export default function BasisAnalysis() {
         },
         {
           label: '下季年化基差%',
-          data: allDates.map(d => nxtMap.get(d) ?? null),
+          data: visibleDates.map(d => nxtMap.get(d) ?? null),
           borderColor: '#f97316',
           backgroundColor: 'transparent',
           fill: false,
@@ -176,7 +190,7 @@ export default function BasisAnalysis() {
         },
         {
           label: '零线',
-          data: allDates.map(() => 0),
+          data: visibleDates.map(() => 0),
           borderColor: '#d1d5db',
           backgroundColor: 'transparent',
           fill: false,
@@ -187,7 +201,7 @@ export default function BasisAnalysis() {
         },
       ],
     }
-  }, [allDates, currentSeries, nextSeries])
+  }, [visibleDates, currentSeries, nextSeries])
 
   const chartOptions = useMemo(() => ({
     responsive: true,
@@ -429,6 +443,16 @@ export default function BasisAnalysis() {
             <div className="h-72">
               <Line data={chartData} options={chartOptions} />
             </div>
+          )}
+
+          {/* Range scrubber */}
+          {!loading && allDates.length > 1 && (
+            <RangeScrubber
+              dates={allDates}
+              startIdx={scrubStart}
+              endIdx={scrubEnd}
+              onChange={(s, e) => { setScrubStart(s); setScrubEnd(e) }}
+            />
           )}
         </div>
 

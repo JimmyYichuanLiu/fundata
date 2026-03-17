@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -17,6 +17,7 @@ import {
   daysAgoYYYYMMDD,
   parseCrudeDate,
 } from '../api/crudeApi.js'
+import RangeScrubber from '../components/RangeScrubber.jsx'
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend)
 
@@ -79,6 +80,19 @@ export default function CrudeOilComparison() {
   const [latestDate, setLatestDate]   = useState(null)
   const [loading,    setLoading]      = useState(false)
   const [error,      setError]        = useState(null)
+
+  // Scrubber indices into items
+  const [scrubStart, setScrubStart] = useState(0)
+  const [scrubEnd,   setScrubEnd]   = useState(0)
+
+  // Reset scrubber to full range when items change
+  useEffect(() => {
+    setScrubStart(0)
+    setScrubEnd(Math.max(0, items.length - 1))
+  }, [items])
+
+  // Visible slice for chart
+  const visibleItems = useMemo(() => items.slice(scrubStart, scrubEnd + 1), [items, scrubStart, scrubEnd])
 
   const [syncStatus, setSyncStatus]   = useState(null)
   const [syncing,    setSyncing]      = useState(false)
@@ -160,37 +174,37 @@ export default function CrudeOilComparison() {
   // ── Chart.js 数据 ──────────────────────────────────────────────────────────
 
   const chartData = {
-    labels: items.map(it => yyyymmddToDisplay(it.trade_date)),
+    labels: visibleItems.map(it => yyyymmddToDisplay(it.trade_date)),
     datasets: [
       {
         label:           SYMBOL_META.WTI.label,
-        data:            items.map(it => it.WTI ?? null),
+        data:            visibleItems.map(it => it.WTI ?? null),
         borderColor:     SYMBOL_COLORS.WTI.border,
         backgroundColor: SYMBOL_COLORS.WTI.background,
         borderWidth: 2,
-        pointRadius: items.length > 200 ? 0 : 2,
+        pointRadius: visibleItems.length > 200 ? 0 : 2,
         tension: 0.1,
         yAxisID: 'y',
         spanGaps: true,
       },
       {
         label:           SYMBOL_META.BRENT.label,
-        data:            items.map(it => it.BRENT ?? null),
+        data:            visibleItems.map(it => it.BRENT ?? null),
         borderColor:     SYMBOL_COLORS.BRENT.border,
         backgroundColor: SYMBOL_COLORS.BRENT.background,
         borderWidth: 2,
-        pointRadius: items.length > 200 ? 0 : 2,
+        pointRadius: visibleItems.length > 200 ? 0 : 2,
         tension: 0.1,
         yAxisID: 'y',
         spanGaps: true,
       },
       {
         label:           SYMBOL_META.SC.label,
-        data:            items.map(it => it.SC ?? null),
+        data:            visibleItems.map(it => it.SC ?? null),
         borderColor:     SYMBOL_COLORS.SC.border,
         backgroundColor: SYMBOL_COLORS.SC.background,
         borderWidth: 2,
-        pointRadius: items.length > 200 ? 0 : 2,
+        pointRadius: visibleItems.length > 200 ? 0 : 2,
         tension: 0.1,
         yAxisID: 'y1',
         spanGaps: true,
@@ -358,7 +372,15 @@ export default function CrudeOilComparison() {
           </div>
         )}
         {!loading && !error && items.length > 0 && (
-          <Line data={chartData} options={chartOptions} />
+          <>
+            <Line data={chartData} options={chartOptions} />
+            <RangeScrubber
+              dates={items.map(it => it.trade_date)}
+              startIdx={scrubStart}
+              endIdx={scrubEnd}
+              onChange={(s, e) => { setScrubStart(s); setScrubEnd(e) }}
+            />
+          </>
         )}
       </div>
 

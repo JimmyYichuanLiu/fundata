@@ -11,6 +11,7 @@ import {
 import { Line } from 'react-chartjs-2'
 import { fetchFunds, fetchCompare, subtractDays } from '../api.js'
 import { computeMetrics } from '../utils/metrics.js'
+import RangeScrubber from '../components/RangeScrubber.jsx'
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Tooltip, Legend)
 
@@ -65,9 +66,13 @@ export default function FundComparison() {
   const [isCustomRange, setIsCustomRange] = useState(false)
   const [customFrom, setCustomFrom] = useState('')
   const [customTo, setCustomTo] = useState('')
-  const [normalize, setNormalize] = useState(true)
+  const [normalize, setNormalize] = useState('norm100') // 'absolute' | 'norm100' | 'return'
   const [compareData, setCompareData] = useState(null)
   const [loading, setLoading] = useState(false)
+
+  // Scrubber
+  const [scrubStart, setScrubStart] = useState(0)
+  const [scrubEnd,   setScrubEnd]   = useState(0)
 
   const searchRef = useRef(null)
   const dropdownRef = useRef(null)
@@ -152,26 +157,37 @@ export default function FundComparison() {
   }, [])
 
   // Build chart dataset
-  const chartData = useMemo(() => {
-    if (!compareData || selectedFunds.length === 0) return null
-
-    // Collect all unique dates across funds
+  const allDates = useMemo(() => {
+    if (!compareData || selectedFunds.length === 0) return []
     const dateSet = new Set()
     selectedFunds.forEach(fund => {
       const series = compareData.funds?.[fund.fund_id]?.series || []
       series.forEach(s => dateSet.add(s.date))
     })
-    const allDates = Array.from(dateSet).sort()
+    return Array.from(dateSet).sort()
+  }, [compareData, selectedFunds])
+
+  // Reset scrubber when dates change
+  useEffect(() => {
+    setScrubStart(0)
+    setScrubEnd(Math.max(0, allDates.length - 1))
+  }, [allDates])
+
+  const visibleDates = useMemo(() => allDates.slice(scrubStart, scrubEnd + 1), [allDates, scrubStart, scrubEnd])
+
+  const chartData = useMemo(() => {
+    if (!compareData || selectedFunds.length === 0) return null
 
     const datasets = selectedFunds.map((fund, idx) => {
       const series = compareData.funds?.[fund.fund_id]?.series || []
       const seriesMap = new Map(series.map(s => [s.date, s.nav]))
-      const baseVal = normalize && series.length > 0 ? series[0].nav : null
+      const baseVal = series.length > 0 && normalize !== 'absolute' ? series[0].nav : null
 
-      const vals = allDates.map(date => {
+      const vals = visibleDates.map(date => {
         const v = seriesMap.get(date)
         if (v == null) return null
-        if (normalize && baseVal != null && baseVal > 0) return v / baseVal * 100
+        if (normalize === 'norm100' && baseVal != null && baseVal > 0) return v / baseVal * 100
+        if (normalize === 'return'  && baseVal != null && baseVal > 0) return v / baseVal
         return v
       })
 
@@ -189,8 +205,8 @@ export default function FundComparison() {
       }
     })
 
-    return { labels: allDates, datasets }
-  }, [compareData, selectedFunds, normalize])
+    return { labels: visibleDates, datasets }
+  }, [compareData, selectedFunds, normalize, visibleDates])
 
   // Chart options
   const chartOptions = useMemo(() => ({
@@ -205,7 +221,11 @@ export default function FundComparison() {
           title: items => items[0]?.label || '',
           label: item => {
             const val = Number(item.raw)
-            return `${item.dataset.label}: ${normalize ? val.toFixed(2) : val.toFixed(4)}`
+            if (normalize === 'return') {
+              const sign = val >= 1 ? '+' : ''
+              return `${item.dataset.label}: ${sign}${((val - 1) * 100).toFixed(2)}%`
+            }
+            return `${item.dataset.label}: ${normalize === 'norm100' ? val.toFixed(2) : val.toFixed(4)}`
           },
         },
       },
@@ -219,7 +239,13 @@ export default function FundComparison() {
         position: 'right',
         grid: { color: '#f3f4f6' },
         ticks: {
-          callback: v => normalize ? Number(v).toFixed(1) : Number(v).toFixed(4),
+          callback: v => {
+            if (normalize === 'return') {
+              const pct = (Number(v) - 1) * 100
+              return (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%'
+            }
+            return normalize === 'norm100' ? Number(v).toFixed(1) : Number(v).toFixed(4)
+          },
           font: { size: 11 },
           color: '#9ca3af',
         },
@@ -359,15 +385,24 @@ export default function FundComparison() {
             </div>
 
             {/* Normalize toggle */}
-            <div className="ml-auto flex items-center gap-2">
-              <button
-                onClick={() => setNormalize(v => !v)}
-                className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-                  normalize ? 'bg-purple-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                }`}
-              >
-                {normalize ? '归一到100' : '绝对净值'}
-              </button>
+            <div className="ml-auto flex items-center gap-1">
+              {[
+                { value: 'absolute', label: '绝对净值' },
+                { value: 'norm100',  label: '归一到100' },
+                { value: 'return',   label: '收益率' },
+              ].map(opt => (
+                <button
+                  key={opt.value}
+                  onClick={() => setNormalize(opt.value)}
+                  className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                    normalize === opt.value
+                      ? 'bg-purple-600 text-white'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
             </div>
           </div>
 
@@ -397,7 +432,8 @@ export default function FundComparison() {
           <div className="bg-white rounded-xl shadow p-4">
             <h2 className="text-sm font-semibold text-gray-700 mb-3">
               净值走势对比
-              {normalize && <span className="ml-2 text-xs font-normal text-gray-400">（各自归一到100）</span>}
+              {normalize === 'norm100' && <span className="ml-2 text-xs font-normal text-gray-400">（各自归一到100）</span>}
+              {normalize === 'return'  && <span className="ml-2 text-xs font-normal text-gray-400">（收益率，以1为基准）</span>}
             </h2>
             {loading ? (
               <div className="shimmer rounded-lg h-80" />
@@ -409,6 +445,14 @@ export default function FundComparison() {
               <div className="h-80 flex items-center justify-center text-gray-400 text-sm">
                 暂无数据
               </div>
+            )}
+            {!loading && allDates.length > 1 && (
+              <RangeScrubber
+                dates={allDates}
+                startIdx={scrubStart}
+                endIdx={scrubEnd}
+                onChange={(s, e) => { setScrubStart(s); setScrubEnd(e) }}
+              />
             )}
           </div>
         )}
