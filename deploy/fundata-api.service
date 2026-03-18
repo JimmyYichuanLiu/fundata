@@ -1,0 +1,30 @@
+[Unit]
+Description=FundTrack API (uvicorn)
+After=network.target
+
+[Service]
+Type=exec
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/fundata
+
+# 从 .env 文件加载环境变量（含邮箱密码等敏感信息）
+EnvironmentFile=/opt/fundata/.env
+
+# 绑定到 127.0.0.1，只接受 nginx 转发，不对外暴露
+ExecStart=/opt/fundata/venv/bin/uvicorn api:app \
+    --host 127.0.0.1 \
+    --port 8000 \
+    --workers 1 \
+    --log-level info
+
+# 崩溃后自动重启
+Restart=on-failure
+RestartSec=5
+
+# 日志写入 journald（用 journalctl -u fundata-api 查看）
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

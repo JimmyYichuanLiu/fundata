@@ -89,13 +89,13 @@ export default function Layout({ children }) {
 
       {/* Main content */}
       <main className="flex-1 flex flex-col min-w-0">
-        {/* Mobile hamburger */}
-        <button
-          onClick={() => setSidebarOpen(true)}
-          className="lg:hidden fixed top-4 left-4 z-30 w-10 h-10 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg flex items-center justify-center shadow-sm"
-        >
-          <span className="material-symbols-outlined">menu</span>
-        </button>
+        {/* Mobile topbar */}
+        <div className="lg:hidden sticky top-0 z-40 h-14 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-700 flex items-center px-4 gap-3 shadow-sm">
+          <button onClick={() => setSidebarOpen(true)} className="w-10 h-10 flex items-center justify-center rounded-lg border border-slate-200 dark:border-slate-700">
+            <span className="material-symbols-outlined">menu</span>
+          </button>
+          <span className="font-bold text-base tracking-tight">FundTrack</span>
+        </div>
         {children}
       </main>
     </div>

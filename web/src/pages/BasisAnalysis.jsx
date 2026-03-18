@@ -56,7 +56,7 @@ function dbDateToDisplay(d) {
 
 function calcColor(val) {
   if (val == null) return 'text-gray-400'
-  return val > 0 ? 'text-emerald-600' : 'text-red-500'
+  return val > 0 ? 'text-red-500' : 'text-emerald-600'
 }
 
 function formatPct(val, decimals = 2) {
@@ -254,13 +254,12 @@ export default function BasisAnalysis() {
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
-      <header className="bg-white border-b border-gray-200 sticky top-0 z-10">
+      <header className="bg-white border-b border-gray-200 sticky top-14 lg:top-0 z-10">
         <div className="max-w-6xl mx-auto px-4 py-4 flex flex-wrap items-center gap-4">
           <h1 className="text-xl font-bold text-gray-900 flex items-center gap-2">
             <span className="inline-flex items-center justify-center w-8 h-8 bg-teal-600 text-white text-sm font-bold rounded">差</span>
             股指基差分析
           </h1>
-          <a href="/market" className="text-sm text-gray-500 hover:text-gray-700">← 行情看板</a>
           <p className="text-xs text-gray-400 ml-2">
             基差 = 现货 − 期货 &nbsp;·&nbsp; 年化基差% = 基差 / 期货价 / 剩余天数 × 365 × 100
           </p>
@@ -270,12 +269,12 @@ export default function BasisAnalysis() {
       <main className="max-w-6xl mx-auto px-4 py-6 space-y-6">
 
         {/* Symbol tabs */}
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
           {SYMBOLS.map(s => (
             <button
               key={s.symbol}
               onClick={() => setActiveSymbol(s.symbol)}
-              className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+              className={`px-3 py-1.5 md:px-4 md:py-2 rounded-lg text-sm font-medium transition-colors ${
                 activeSymbol === s.symbol
                   ? 'bg-teal-600 text-white shadow'
                   : 'bg-white text-gray-600 border border-gray-200 hover:border-teal-400 hover:text-teal-600'
@@ -345,26 +344,26 @@ export default function BasisAnalysis() {
               <table className="w-full text-xs">
                 <thead>
                   <tr className="bg-gray-50 border-b border-gray-200 text-left text-gray-500 font-medium">
-                    <th className="px-4 py-2">合约</th>
-                    <th className="px-4 py-2">类型</th>
-                    <th className="px-4 py-2">到期日</th>
-                    <th className="px-4 py-2 text-right">剩余天数</th>
-                    <th className="px-4 py-2 text-right">现货</th>
-                    <th className="px-4 py-2 text-right">期货</th>
-                    <th className="px-4 py-2 text-right">基差</th>
-                    <th className="px-4 py-2 text-right">年化基差%</th>
-                    <th className="px-4 py-2 text-center">方向</th>
+                    <th className="px-2 py-2 md:px-4">合約</th>
+                    <th className="px-2 py-2 md:px-4">类型</th>
+                    <th className="px-2 py-2 md:px-4">到期日</th>
+                    <th className="px-2 py-2 md:px-4 text-right">剩余天数</th>
+                    <th className="px-2 py-2 md:px-4 text-right">现货</th>
+                    <th className="px-2 py-2 md:px-4 text-right">期货</th>
+                    <th className="px-2 py-2 md:px-4 text-right">基差</th>
+                    <th className="px-2 py-2 md:px-4 text-right">年化基差%</th>
+                    <th className="px-2 py-2 md:px-4 text-center">方向</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {todayData.items.map(item => (
                     <tr key={item.ts_code} className="hover:bg-gray-50">
-                      <td className="px-4 py-2.5">
+                      <td className="px-2 py-2 md:px-4 md:py-2.5">
                         <code className={`font-mono font-semibold text-gray-700 border-l-2 pl-2 ${CONTRACT_COLORS[item.contract_type] || 'border-gray-300'}`}>
                           {item.ts_code}
                         </code>
                       </td>
-                      <td className="px-4 py-2.5">
+                      <td className="px-2 py-2 md:px-4 md:py-2.5">
                         <span className={`text-xs font-medium ${
                           item.contract_type === '当季' ? 'text-blue-600' :
                           item.contract_type === '下季' ? 'text-orange-500' :
@@ -373,30 +372,30 @@ export default function BasisAnalysis() {
                           {item.contract_type}
                         </span>
                       </td>
-                      <td className="px-4 py-2.5 text-gray-500">
+                      <td className="px-2 py-2 md:px-4 md:py-2.5 text-gray-500">
                         {dbDateToDisplay(item.expiry_date)}
                       </td>
-                      <td className="px-4 py-2.5 text-right text-gray-500">
+                      <td className="px-2 py-2 md:px-4 md:py-2.5 text-right text-gray-500">
                         {item.remaining_days}
                       </td>
-                      <td className="px-4 py-2.5 text-right font-mono text-gray-700">
+                      <td className="px-2 py-2 md:px-4 md:py-2.5 text-right font-mono text-gray-700">
                         {item.index_close?.toFixed(2) ?? '—'}
                       </td>
-                      <td className="px-4 py-2.5 text-right font-mono text-gray-700">
+                      <td className="px-2 py-2 md:px-4 md:py-2.5 text-right font-mono text-gray-700">
                         {item.futures_close?.toFixed(2) ?? '—'}
                       </td>
-                      <td className={`px-4 py-2.5 text-right font-mono font-medium ${calcColor(item.basis)}`}>
+                      <td className={`px-2 py-2 md:px-4 md:py-2.5 text-right font-mono font-medium ${calcColor(item.basis)}`}>
                         {item.basis != null ? (item.basis > 0 ? '+' : '') + item.basis.toFixed(2) : '—'}
                       </td>
-                      <td className={`px-4 py-2.5 text-right font-mono font-bold ${calcColor(item.annualized_basis_pct)}`}>
+                      <td className={`px-2 py-2 md:px-4 md:py-2.5 text-right font-mono font-bold ${calcColor(item.annualized_basis_pct)}`}>
                         {formatPct(item.annualized_basis_pct, 2)}
                       </td>
-                      <td className="px-4 py-2.5 text-center">
+                      <td className="px-2 py-2 md:px-4 md:py-2.5 text-center">
                         {item.annualized_basis_pct != null ? (
                           <span className={`inline-block px-1.5 py-0.5 rounded text-xs font-medium ${
                             item.annualized_basis_pct > 0
-                              ? 'bg-emerald-50 text-emerald-700'
-                              : 'bg-red-50 text-red-600'
+                              ? 'bg-red-50 text-red-600'
+                              : 'bg-emerald-50 text-emerald-700'
                           }`}>
                             {item.annualized_basis_pct > 0 ? '贴水' : '升水'}
                           </span>
@@ -474,19 +473,19 @@ export default function BasisAnalysis() {
                 <table className="w-full text-xs">
                   <thead>
                     <tr className="bg-gray-50 border-b border-gray-200 text-left text-gray-500 font-medium">
-                      <th className="px-4 py-2">日期</th>
-                      <th className="px-4 py-2">合约</th>
-                      <th className="px-4 py-2 text-right">现货</th>
-                      <th className="px-4 py-2 text-right">期货</th>
-                      <th className="px-4 py-2 text-right">基差</th>
-                      <th className="px-4 py-2 text-right">年化基差%</th>
-                      <th className="px-4 py-2 text-right">剩余天数</th>
-                      <th className="px-4 py-2">合约</th>
-                      <th className="px-4 py-2 text-right">现货</th>
-                      <th className="px-4 py-2 text-right">期货</th>
-                      <th className="px-4 py-2 text-right">基差</th>
-                      <th className="px-4 py-2 text-right">年化基差%</th>
-                      <th className="px-4 py-2 text-right">剩余天数</th>
+                      <th className="px-2 py-1.5 md:px-4 md:py-2">日期</th>
+                      <th className="px-2 py-1.5 md:px-4 md:py-2">合约</th>
+                      <th className="px-2 py-1.5 md:px-4 md:py-2 text-right">现货</th>
+                      <th className="px-2 py-1.5 md:px-4 md:py-2 text-right">期货</th>
+                      <th className="px-2 py-1.5 md:px-4 md:py-2 text-right">基差</th>
+                      <th className="px-2 py-1.5 md:px-4 md:py-2 text-right">年化基差%</th>
+                      <th className="px-2 py-1.5 md:px-4 md:py-2 text-right">剩余天数</th>
+                      <th className="px-2 py-1.5 md:px-4 md:py-2">合约</th>
+                      <th className="px-2 py-1.5 md:px-4 md:py-2 text-right">现货</th>
+                      <th className="px-2 py-1.5 md:px-4 md:py-2 text-right">期货</th>
+                      <th className="px-2 py-1.5 md:px-4 md:py-2 text-right">基差</th>
+                      <th className="px-2 py-1.5 md:px-4 md:py-2 text-right">年化基差%</th>
+                      <th className="px-2 py-1.5 md:px-4 md:py-2 text-right">剩余天数</th>
                     </tr>
                     <tr className="bg-gray-50 border-b border-gray-100 text-gray-400 text-xs">
                       <th className="px-4 py-1" />
@@ -499,45 +498,45 @@ export default function BasisAnalysis() {
                   <tbody className="divide-y divide-gray-100">
                     {tableRows.map(({ date, current: c, next: n }) => (
                       <tr key={date} className="hover:bg-gray-50">
-                        <td className="px-4 py-2 text-gray-500 whitespace-nowrap">
+                        <td className="px-2 py-1.5 md:px-4 md:py-2 text-gray-500 whitespace-nowrap">
                           {dbDateToDisplay(date)}
                         </td>
                         {/* 当季 */}
-                        <td className="px-4 py-2">
+                        <td className="px-2 py-1.5 md:px-4 md:py-2">
                           <code className="font-mono text-gray-600">{c?.ts_code ?? '—'}</code>
                         </td>
-                        <td className="px-4 py-2 text-right font-mono text-gray-700">
+                        <td className="px-2 py-1.5 md:px-4 md:py-2 text-right font-mono text-gray-700">
                           {c?.index_close?.toFixed(2) ?? '—'}
                         </td>
-                        <td className="px-4 py-2 text-right font-mono text-gray-700">
+                        <td className="px-2 py-1.5 md:px-4 md:py-2 text-right font-mono text-gray-700">
                           {c?.futures_close?.toFixed(2) ?? '—'}
                         </td>
-                        <td className={`px-4 py-2 text-right font-mono font-medium ${calcColor(c?.basis)}`}>
+                        <td className={`px-2 py-1.5 md:px-4 md:py-2 text-right font-mono font-medium ${calcColor(c?.basis)}`}>
                           {c?.basis != null ? (c.basis > 0 ? '+' : '') + c.basis.toFixed(2) : '—'}
                         </td>
-                        <td className={`px-4 py-2 text-right font-mono font-medium ${calcColor(c?.annualized_basis_pct)}`}>
+                        <td className={`px-2 py-1.5 md:px-4 md:py-2 text-right font-mono font-medium ${calcColor(c?.annualized_basis_pct)}`}>
                           {formatPct(c?.annualized_basis_pct)}
                         </td>
-                        <td className="px-4 py-2 text-right text-gray-500">
+                        <td className="px-2 py-1.5 md:px-4 md:py-2 text-right text-gray-500">
                           {c?.remaining_days ?? '—'}
                         </td>
                         {/* 下季 */}
-                        <td className="px-4 py-2">
+                        <td className="px-2 py-1.5 md:px-4 md:py-2">
                           <code className="font-mono text-gray-600">{n?.ts_code ?? '—'}</code>
                         </td>
-                        <td className="px-4 py-2 text-right font-mono text-gray-700">
+                        <td className="px-2 py-1.5 md:px-4 md:py-2 text-right font-mono text-gray-700">
                           {n?.index_close?.toFixed(2) ?? '—'}
                         </td>
-                        <td className="px-4 py-2 text-right font-mono text-gray-700">
+                        <td className="px-2 py-1.5 md:px-4 md:py-2 text-right font-mono text-gray-700">
                           {n?.futures_close?.toFixed(2) ?? '—'}
                         </td>
-                        <td className={`px-4 py-2 text-right font-mono font-medium ${calcColor(n?.basis)}`}>
+                        <td className={`px-2 py-1.5 md:px-4 md:py-2 text-right font-mono font-medium ${calcColor(n?.basis)}`}>
                           {n?.basis != null ? (n.basis > 0 ? '+' : '') + n.basis.toFixed(2) : '—'}
                         </td>
-                        <td className={`px-4 py-2 text-right font-mono font-medium ${calcColor(n?.annualized_basis_pct)}`}>
+                        <td className={`px-2 py-1.5 md:px-4 md:py-2 text-right font-mono font-medium ${calcColor(n?.annualized_basis_pct)}`}>
                           {formatPct(n?.annualized_basis_pct)}
                         </td>
-                        <td className="px-4 py-2 text-right text-gray-500">
+                        <td className="px-2 py-1.5 md:px-4 md:py-2 text-right text-gray-500">
                           {n?.remaining_days ?? '—'}
                         </td>
                       </tr>

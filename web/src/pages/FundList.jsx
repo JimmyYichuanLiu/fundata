@@ -54,7 +54,7 @@ function SkeletonRow() {
   return (
     <tr>
       {[32, 260, 70, 70, 80, 60, 50].map((w, i) => (
-        <td key={i} className="px-6 py-4">
+        <td key={i} className="px-3 py-3 md:px-6 md:py-4">
           <div className="shimmer rounded h-4" style={{ width: w }} />
         </td>
       ))}
@@ -65,7 +65,7 @@ function SkeletonRow() {
 // ── Percentage cell ──
 function PctCell({ pct }) {
   if (pct == null) return <span className="text-slate-400 text-sm">—</span>
-  const color = pct > 0 ? 'text-emerald-500' : pct < 0 ? 'text-rose-500' : 'text-slate-400'
+  const color = pct > 0 ? 'text-rose-500' : pct < 0 ? 'text-emerald-600' : 'text-slate-400'
   const sign = pct > 0 ? '+' : ''
   return <span className={`font-medium text-sm ${color}`}>{sign}{pct.toFixed(2)}%</span>
 }
@@ -83,7 +83,7 @@ function Sparkline({ data, width = 80, height = 24 }) {
   }).join(' ')
   const lastVal = data[data.length - 1]
   const firstVal = data[0]
-  const color = lastVal >= firstVal ? '#10b981' : '#f43f5e'
+  const color = lastVal >= firstVal ? '#ef4444' : '#10b981'
   return (
     <svg width={width} height={height} className="inline-block align-middle">
       <polyline
@@ -108,12 +108,12 @@ function SortIcon({ active, dir }) {
 function MetricCell({ val, format }) {
   if (val == null) return <span className="text-slate-300 text-sm">—</span>
   if (format === 'pct') {
-    const color = val > 0 ? 'text-emerald-500' : val < 0 ? 'text-rose-500' : 'text-slate-400'
+    const color = val > 0 ? 'text-rose-500' : val < 0 ? 'text-emerald-600' : 'text-slate-400'
     const sign = val > 0 ? '+' : ''
     return <span className={`font-medium text-sm ${color}`}>{sign}{val.toFixed(2)}%</span>
   }
   if (format === 'ratio') {
-    const color = val > 0 ? 'text-emerald-500' : val < 0 ? 'text-rose-500' : 'text-slate-400'
+    const color = val > 0 ? 'text-rose-500' : val < 0 ? 'text-emerald-600' : 'text-slate-400'
     return <span className={`font-medium text-sm ${color}`}>{val.toFixed(3)}</span>
   }
   return <span className="text-sm">{val}</span>
@@ -565,7 +565,7 @@ export default function FundList() {
       )}
 
       {/* ─── Header ─── */}
-      <header className="h-16 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-8 flex items-center justify-between sticky top-0 z-10">
+      <header className="h-16 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-4 md:px-8 flex items-center justify-between sticky top-14 lg:top-0 z-10">
         <div className="flex items-center gap-8">
           {stats && (
             <>
@@ -614,7 +614,7 @@ export default function FundList() {
       </header>
 
       {/* ─── Content ─── */}
-      <div className="p-8 overflow-y-auto custom-scrollbar flex-1">
+      <div className="p-4 md:p-8 overflow-y-auto custom-scrollbar flex-1">
         {/* Error banner */}
         {error && (
           <div className="mb-6 flex items-center gap-3 bg-rose-50 dark:bg-rose-900/20 border border-rose-200 dark:border-rose-800 rounded-xl px-5 py-3 text-sm">
@@ -771,22 +771,22 @@ export default function FundList() {
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="bg-slate-50 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-800">
-                  <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider w-12">#</th>
+                  <th className="px-3 py-3 md:px-6 md:py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider w-12">#</th>
                   <th
-                    className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider min-w-[260px] cursor-pointer select-none hover:text-primary"
+                    className="px-3 py-3 md:px-6 md:py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider min-w-[260px] cursor-pointer select-none hover:text-primary"
                     onClick={() => handleSort('product_name')}
                   >
                     基金名称 <SortIcon active={sortKey === 'product_name'} dir={sortDir} />
                   </th>
-                  <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider">代码</th>
+                  <th className="px-3 py-3 md:px-6 md:py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider">代码</th>
                   <th
-                    className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider cursor-pointer select-none hover:text-primary"
+                    className="px-3 py-3 md:px-6 md:py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider cursor-pointer select-none hover:text-primary"
                     onClick={() => handleSort('latest_nav')}
                   >
                     最新净值 <SortIcon active={sortKey === 'latest_nav'} dir={sortDir} />
                   </th>
                   <th
-                    className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider cursor-pointer select-none hover:text-primary"
+                    className="px-3 py-3 md:px-6 md:py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider cursor-pointer select-none hover:text-primary"
                     onClick={() => handleSort('latest_date')}
                   >
                     净值日期 <SortIcon active={sortKey === 'latest_date'} dir={sortDir} />
@@ -794,14 +794,14 @@ export default function FundList() {
                   {COLUMN_DEFS.filter(c => visibleCols.has(c.key)).map(col => (
                     <th
                       key={col.key}
-                      className={`px-6 py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider ${col.key === 'sparkline' ? 'text-center' : 'text-right'} ${col.sortable ? 'cursor-pointer select-none hover:text-primary' : ''}`}
+                      className={`px-3 py-3 md:px-6 md:py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider ${col.key === 'sparkline' ? 'text-center' : 'text-right'} ${col.sortable ? 'cursor-pointer select-none hover:text-primary' : ''}`}
                       onClick={col.sortable ? () => handleSort(col.key) : undefined}
                     >
                       {col.label}{col.sortable && <SortIcon active={sortKey === col.key} dir={sortDir} />}
                     </th>
                   ))}
-                  <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider text-center">状态</th>
-                  <th className="px-6 py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">操作</th>
+                  <th className="px-3 py-3 md:px-6 md:py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider text-center">状态</th>
+                  <th className="px-3 py-3 md:px-6 md:py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">操作</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -824,10 +824,10 @@ export default function FundList() {
                           }`}
                           onClick={() => navigate(`/fund/${fund.fund_id}`)}
                         >
-                          <td className="px-6 py-4 text-sm text-slate-400">
+                          <td className="px-3 py-3 md:px-6 md:py-4 text-sm text-slate-400">
                             {String(globalIdx + 1).padStart(2, '0')}
                           </td>
-                          <td className="px-6 py-4">
+                          <td className="px-3 py-3 md:px-6 md:py-4">
                             <div className="flex flex-col">
                               <span className="font-medium text-slate-900 dark:text-white">
                                 {fund.product_name || '—'}
@@ -865,39 +865,39 @@ export default function FundList() {
                               </div>
                             </div>
                           </td>
-                          <td className="px-6 py-4 text-sm font-mono text-slate-500">
+                          <td className="px-3 py-3 md:px-6 md:py-4 text-sm font-mono text-slate-500">
                             {fund.product_code}
                           </td>
-                          <td className="px-6 py-4">
+                          <td className="px-3 py-3 md:px-6 md:py-4">
                             <span className="text-sm font-semibold">
                               {fund.latest_nav != null ? fund.latest_nav.toFixed(4) : '—'}
                             </span>
                           </td>
-                          <td className="px-6 py-4 text-sm text-slate-500">
+                          <td className="px-3 py-3 md:px-6 md:py-4 text-sm text-slate-500">
                             {fund.latest_date || '—'}
                           </td>
                           {COLUMN_DEFS.filter(c => visibleCols.has(c.key)).map(col => {
                             const ret = fundReturns[fund.fund_id]
                             const met = fundMetrics[fund.fund_id]
                             if (col.key === 'sparkline') return (
-                              <td key="sparkline" className="px-6 py-4 text-center">
+                              <td key="sparkline" className="px-3 py-3 md:px-6 md:py-4 text-center">
                                 <Sparkline data={ret?.sparkline} />
                               </td>
                             )
-                            if (col.key === '1w') return <td key="1w" className="px-6 py-4 text-right"><PctCell pct={ret?.['1w']} /></td>
-                            if (col.key === '1m') return <td key="1m" className="px-6 py-4 text-right"><PctCell pct={ret?.['1m']} /></td>
-                            if (col.key === '3m') return <td key="3m" className="px-6 py-4 text-right"><PctCell pct={ret?.['3m']} /></td>
-                            if (col.key === '6m') return <td key="6m" className="px-6 py-4 text-right"><PctCell pct={ret?.['6m']} /></td>
-                            if (col.key === '1y') return <td key="1y" className="px-6 py-4 text-right"><PctCell pct={ret?.['1y']} /></td>
-                            if (col.key === 'ytd') return <td key="ytd" className="px-6 py-4 text-right"><PctCell pct={ret?.['ytd']} /></td>
-                            if (col.key === 'annualized_return') return <td key="annualized_return" className="px-6 py-4 text-right"><MetricCell val={met?.annualized_return} format="pct" /></td>
-                            if (col.key === 'max_drawdown') return <td key="max_drawdown" className="px-6 py-4 text-right"><MetricCell val={met?.max_drawdown} format="pct" /></td>
-                            if (col.key === 'annualized_vol') return <td key="annualized_vol" className="px-6 py-4 text-right"><MetricCell val={met?.annualized_vol} format="pct" /></td>
-                            if (col.key === 'sharpe') return <td key="sharpe" className="px-6 py-4 text-right"><MetricCell val={met?.sharpe} format="ratio" /></td>
-                            if (col.key === 'monthly_win_rate') return <td key="monthly_win_rate" className="px-6 py-4 text-right"><MetricCell val={met?.monthly_win_rate} format="pct" /></td>
+                            if (col.key === '1w') return <td key="1w" className="px-3 py-3 md:px-6 md:py-4 text-right"><PctCell pct={ret?.['1w']} /></td>
+                            if (col.key === '1m') return <td key="1m" className="px-3 py-3 md:px-6 md:py-4 text-right"><PctCell pct={ret?.['1m']} /></td>
+                            if (col.key === '3m') return <td key="3m" className="px-3 py-3 md:px-6 md:py-4 text-right"><PctCell pct={ret?.['3m']} /></td>
+                            if (col.key === '6m') return <td key="6m" className="px-3 py-3 md:px-6 md:py-4 text-right"><PctCell pct={ret?.['6m']} /></td>
+                            if (col.key === '1y') return <td key="1y" className="px-3 py-3 md:px-6 md:py-4 text-right"><PctCell pct={ret?.['1y']} /></td>
+                            if (col.key === 'ytd') return <td key="ytd" className="px-3 py-3 md:px-6 md:py-4 text-right"><PctCell pct={ret?.['ytd']} /></td>
+                            if (col.key === 'annualized_return') return <td key="annualized_return" className="px-3 py-3 md:px-6 md:py-4 text-right"><MetricCell val={met?.annualized_return} format="pct" /></td>
+                            if (col.key === 'max_drawdown') return <td key="max_drawdown" className="px-3 py-3 md:px-6 md:py-4 text-right"><MetricCell val={met?.max_drawdown} format="pct" /></td>
+                            if (col.key === 'annualized_vol') return <td key="annualized_vol" className="px-3 py-3 md:px-6 md:py-4 text-right"><MetricCell val={met?.annualized_vol} format="pct" /></td>
+                            if (col.key === 'sharpe') return <td key="sharpe" className="px-3 py-3 md:px-6 md:py-4 text-right"><MetricCell val={met?.sharpe} format="ratio" /></td>
+                            if (col.key === 'monthly_win_rate') return <td key="monthly_win_rate" className="px-3 py-3 md:px-6 md:py-4 text-right"><MetricCell val={met?.monthly_win_rate} format="pct" /></td>
                             return null
                           })}
-                          <td className="px-6 py-4 text-center">
+                          <td className="px-3 py-3 md:px-6 md:py-4 text-center">
                             {hasIssue ? (
                               <span
                                 title={buildTooltip(fundIssue)}
@@ -912,7 +912,7 @@ export default function FundList() {
                                 : null
                             )}
                           </td>
-                          <td className="px-6 py-4 text-right">
+                          <td className="px-3 py-3 md:px-6 md:py-4 text-right">
                             <button
                               className="text-primary hover:text-primary/80 text-sm font-medium"
                               onClick={e => { e.stopPropagation(); navigate(`/fund/${fund.fund_id}`) }}

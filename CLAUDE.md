@@ -50,7 +50,24 @@ npm run build
 npm run preview
 ```
 
-## Architecture
+## Deployment (Production — Ubuntu 22.04)
+
+The app is designed to run behind **nginx** on a single Linux server:
+
+- **nginx** listens on port 80, serves `web/dist/` as static files, proxies `/api/` → uvicorn
+- **uvicorn** runs on `127.0.0.1:8000` (not exposed publicly), managed by systemd
+- **deploy/** directory contains ready-to-use config files:
+  - `deploy/nginx-site.conf` — nginx server block (copy to `/etc/nginx/sites-available/`)
+  - `deploy/fundata-api.service` — systemd unit (copy to `/etc/systemd/system/`)
+- App is installed at `/opt/fundata/`, Python venv at `/opt/fundata/venv/`
+- `.env` file at `/opt/fundata/.env` (never committed, contains email credentials)
+- `fund_data.db` lives in `/opt/fundata/` and is **not** in git (gitignored)
+
+**systemd service** reads `EnvironmentFile=/opt/fundata/.env` and starts:
+```
+uvicorn api:app --host 127.0.0.1 --port 8000 --workers 1
+```
+Use `systemctl status fundata-api` and `journalctl -u fundata-api -f` to monitor.
 
 The system has four layers:
 
@@ -69,6 +86,7 @@ The system has four layers:
 - `FundComparison.jsx` (`/compare`): Multi-fund comparison (up to 10 funds), searchable selector, normalized-to-100 or absolute NAV chart, performance metrics table (period return, annualized return, annualized volatility, max drawdown, Sharpe ratio, monthly win rate). Uses `computeMetrics()` from `web/src/utils/metrics.js`.
 - `BasisAnalysis.jsx` (`/basis`): Stock-index futures basis analysis for IF/IC/IH/IM. Shows today's contract snapshot table (当季/下季/隔季, basis, annualized basis%) and historical annualized basis% chart. Calls `/api/market/basis/quarterly` and `/api/market/basis/today`.
 - `CrudeOilComparison.jsx` (`/crude`): Crude oil price comparison page — WTI/Brent (USD, left Y-axis) vs Shanghai SC (CNY, right Y-axis) dual-axis chart, latest-price summary cards, sync controls. API calls in `web/src/api/crudeApi.js`.
+- `RangeScrubber.jsx`: Dual-handle date range scrubber used on chart pages. Handles are `w-4 h-4 md:w-3.5 md:h-3.5` (slightly larger on mobile for touch). Date labels use `text-[11px]`.
 
 The API base URL is proxied via Vite to `http://127.0.0.1:8000`.
 
@@ -187,3 +205,4 @@ MARKET_INTRADAY_MODE=0
 - **Crude oil data**: `get_crude_data.py` + `crude_api.py` are an independent module. `crude_api.py` is an `APIRouter` mounted on `/api/crude`. Data stored in `crude_daily` table (UNIQUE on `ts_code, trade_date`). SC uses `futures_zh_daily_sina("SC0")`; WTI/Brent use `futures_foreign_hist("CL"/"OIL")`. Sync state keys: `crude_last_status`, `crude_last_time`, `crude_last_error`, `crude_last_added`. Import wrapped in try/except so API starts even if akshare is missing.
 - **Fund comparison**: `/compare` route. Uses `/api/compare` endpoint (max 20 fund_ids). Frontend normalizes series to 100 at start date. Performance metrics computed by `web/src/utils/metrics.js` (period return, annualized return, volatility, max drawdown, Sharpe at 2.5% risk-free, monthly win rate).
 - **Basis analysis**: `/basis` route. Calculates stock-index futures basis (spot − futures) and annualizes it (basis / futures / remaining_days × 365 × 100). Covers IF/IC/IH/IM; 当季 and 下季 contracts. Expiry = third Friday of delivery month. Data from `index_daily` joined with `futures_daily`.
+- **Mobile responsiveness**: `Layout.jsx` renders a `lg:hidden sticky top-0 z-40 h-14` topbar on mobile (≥375px) instead of the old `fixed` floating hamburger. All page-level sticky headers use `sticky top-14 lg:top-0` so they stick below the 56px topbar on mobile and at y=0 on desktop. Index cards grid is `grid-cols-2 sm:grid-cols-3 lg:grid-cols-5`. Table cells use `px-3 py-3 md:px-6 md:py-4` (reduced on mobile). Content padding is `p-4 md:p-8`. Symbol tabs in BasisAnalysis use `flex-wrap` so they don't overflow at 375px.

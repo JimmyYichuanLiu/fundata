@@ -12,8 +12,14 @@ import {
 } from 'chart.js'
 import Annotation from 'chartjs-plugin-annotation'
 import { Line } from 'react-chartjs-2'
-import { subtractDays, createNav, deleteNav } from '../../api.js'
+import { createNav, deleteNav } from '../../api.js'
 import RangeScrubber from '../../components/RangeScrubber.jsx'
+import {
+  computeMetrics,
+  computeBenchmarkMetrics,
+  computeTopDrawdowns,
+  computeExcessMetrics,
+} from '../../utils/metrics.js'
 
 ChartJS.register(
   CategoryScale, LinearScale, PointElement, LineElement,
@@ -41,6 +47,47 @@ export const BENCHMARK_OPTIONS = [
   { label: '科创50', code: '000688.SH' },
 ]
 
+const METRIC_DEFS = [
+  { key: 'periodReturn',      label: '区间收益率',   format: 'pct',   group: 'return' },
+  { key: 'annualizedReturn',  label: '年化收益率',   format: 'pct',   group: 'return' },
+  { key: 'annualizedVol',     label: '年化波动率',   format: 'pct',   group: 'risk' },
+  { key: 'downsideRisk',      label: '下行风险',     format: 'pct',   group: 'risk' },
+  { key: 'maxDrawdown',       label: '最大回撤',     format: 'pct',   group: 'risk' },
+  { key: 'maxDDRecoveryDays', label: '回撤回补期',   format: 'days',  group: 'risk' },
+  { key: 'sharpe',            label: '夏普比率',     format: 'ratio', group: 'ratio' },
+  { key: 'sortino',           label: '索提诺比率',   format: 'ratio', group: 'ratio' },
+  { key: 'calmar',            label: '卡玛比率',     format: 'ratio', group: 'ratio' },
+  { key: 'monthlyWinRate',    label: '月胜率',       format: 'pct',   group: 'other' },
+  { key: 'longestNoNewHigh',  label: '最长不创新高', format: 'days',  group: 'other' },
+  { key: 'skewness',          label: '偏度',         format: 'ratio', group: 'risk' },
+  { key: 'kurtosis',          label: '峰度',         format: 'ratio', group: 'risk' },
+  { key: 'var95',             label: 'VaR (95%)',    format: 'pct',   group: 'risk' },
+]
+
+const BENCH_METRIC_DEFS = [
+  { key: 'correlation',      label: '相关系数', format: 'ratio' },
+  { key: 'beta',             label: 'Beta',    format: 'ratio' },
+  { key: 'alpha',            label: 'Alpha',   format: 'pct' },
+  { key: 'trackingError',    label: '跟踪误差', format: 'pct' },
+  { key: 'informationRatio', label: '信息比率', format: 'ratio' },
+]
+
+function formatMetric(val, format) {
+  if (val == null) return '—'
+  if (format === 'pct') return `${val.toFixed(2)}%`
+  if (format === 'ratio') return val.toFixed(3)
+  if (format === 'days') return `${Math.round(val)}天`
+  return String(val)
+}
+
+function metricColor(val, format) {
+  if (val == null) return 'text-gray-400'
+  if (format === 'days') return 'text-gray-800'
+  if (val > 0) return 'text-red-500'
+  if (val < 0) return 'text-emerald-600'
+  return 'text-gray-700'
+}
+
 function createGradient(ctx, chartArea) {
   const gradient = ctx.createLinearGradient(0, chartArea.top, 0, chartArea.bottom)
   gradient.addColorStop(0, 'rgba(59,130,246,0.3)')
@@ -62,7 +109,6 @@ export default function ChartTab({
   hasAccumulated,
   loading,
   onRetry,
-  // range controls
   activeDays,
   setActiveDays,
   isCustomRange,
@@ -74,8 +120,8 @@ export default function ChartTab({
 }) {
   const chartRef = useRef(null)
   const [gradient, setGradient] = useState(null)
+  const [excessMode, setExcessMode] = useState('off') // 'off' | 'arithmetic' | 'geometric'
 
-  // Manual NAV entry state
   const [showNavForm, setShowNavForm] = useState(false)
   const [navForm, setNavForm] = useState({ nav_date: '', unit_nav: '', accumulated_nav: '' })
   const [submitting, setSubmitting] = useState(false)
@@ -83,7 +129,7 @@ export default function ChartTab({
 
   const isBenchmarkMode = !!(normalizedData && benchmarkCode)
 
-  // ── Scrubber: map filteredItems ↔ navItems indices ──
+  // ── Scrubber ──
   const allNavDates = useMemo(() => navItems.map(i => i.nav_date), [navItems])
   const scrubberStart = useMemo(() => {
     if (!filteredItems.length || !navItems.length) return 0
@@ -109,15 +155,72 @@ export default function ChartTab({
     setCustomTo(navItems[endIdx]?.nav_date || '')
   }, [navItems, setIsCustomRange, setActiveDays, setCustomFrom, setCustomTo])
 
+  // ── Metrics computations ──
+  const metricsNavType = navType === 'return' ? 'unit' : navType
+
+  const fundMetrics = useMemo(
+    () => computeMetrics(filteredItems, metricsNavType),
+    [filteredItems, metricsNavType],
+  )
+
+  const benchAlignedItems = useMemo(() => {
+    if (!normalizedData || !benchmarkCode) return null
+    return normalizedData.benchNorm
+      .map((val, i) => ({ nav_date: normalizedData.labels[i], unit_nav: val }))
+      .filter(i => i.unit_nav != null)
+  }, [normalizedData, benchmarkCode])
+
+  const benchMetrics = useMemo(() => {
+    if (!benchAlignedItems) return null
+    return computeMetrics(benchAlignedItems, 'unit')
+  }, [benchAlignedItems])
+
+  const benchRelativeMetrics = useMemo(() => {
+    if (!benchAlignedItems || !benchmarkCode) return null
+    return computeBenchmarkMetrics(filteredItems, benchAlignedItems, metricsNavType)
+  }, [filteredItems, benchAlignedItems, metricsNavType, benchmarkCode])
+
+  const excessMetrics = useMemo(() => {
+    if (!benchAlignedItems || !benchmarkCode || excessMode === 'off') return null
+    return computeExcessMetrics(filteredItems, benchAlignedItems, metricsNavType, excessMode)
+  }, [filteredItems, benchAlignedItems, metricsNavType, benchmarkCode, excessMode])
+
+  const topDrawdowns = useMemo(
+    () => computeTopDrawdowns(filteredItems, metricsNavType, 5),
+    [filteredItems, metricsNavType],
+  )
+
+  // ── Excess curve for chart ──
+  const excessSeriesForChart = useMemo(() => {
+    if (!normalizedData || !benchmarkCode || excessMode === 'off') return null
+    const { fundNorm, benchNorm } = normalizedData
+    if (!fundNorm || !benchNorm || fundNorm.length < 2) return null
+    const base = fundNorm[0] ?? 100
+    const cum = [base]
+    for (let i = 1; i < fundNorm.length; i++) {
+      const pF = fundNorm[i - 1]
+      const cF = fundNorm[i]
+      const pB = benchNorm[i - 1]
+      const cB = benchNorm[i]
+      if (pF == null || pB == null || pF <= 0 || pB <= 0 || cF == null || cB == null) {
+        cum.push(cum[cum.length - 1])
+        continue
+      }
+      const fR = (cF - pF) / pF
+      const bR = (cB - pB) / pB
+      const e = excessMode === 'geometric' ? (1 + fR) / (1 + bR) - 1 : fR - bR
+      cum.push(cum[cum.length - 1] * (1 + e))
+    }
+    return cum
+  }, [normalizedData, benchmarkCode, excessMode])
+
   // ── Chart data ──
   const chartData = useMemo(() => {
     const labels = filteredItems.map(i => i.nav_date)
     let values
     if (navType === 'return') {
-      const base = filteredItems.length > 0
-        ? (filteredItems[0].unit_nav || 1)
-        : 1
-      values = filteredItems.map(i => (i.unit_nav / base))
+      const base = filteredItems.length > 0 ? (filteredItems[0].unit_nav || 1) : 1
+      values = filteredItems.map(i => i.unit_nav / base)
     } else {
       values = filteredItems.map(i =>
         navType === 'unit' ? i.unit_nav : (i.accumulated_nav ?? i.unit_nav)
@@ -129,35 +232,48 @@ export default function ChartTab({
   const data = useMemo(() => {
     if (normalizedData && benchmarkCode) {
       const bLabel = BENCHMARK_OPTIONS.find(o => o.code === benchmarkCode)?.label || benchmarkCode
-      return {
-        labels: normalizedData.labels,
-        datasets: [
-          {
-            label: fund?.product_name || '基金',
-            data: normalizedData.fundNorm,
-            borderColor: '#3b82f6',
-            backgroundColor: 'transparent',
-            fill: false,
-            tension: 0.3,
-            pointRadius: 0,
-            pointHoverRadius: 4,
-            borderWidth: 2,
-          },
-          {
-            label: bLabel,
-            data: normalizedData.benchNorm,
-            borderColor: '#9ca3af',
-            backgroundColor: 'transparent',
-            fill: false,
-            tension: 0.3,
-            pointRadius: 0,
-            pointHoverRadius: 4,
-            borderWidth: 1.5,
-            borderDash: [5, 5],
-            spanGaps: true,
-          },
-        ],
+      const datasets = [
+        {
+          label: fund?.product_name || '基金',
+          data: normalizedData.fundNorm,
+          borderColor: '#3b82f6',
+          backgroundColor: 'transparent',
+          fill: false,
+          tension: 0.3,
+          pointRadius: 0,
+          pointHoverRadius: 4,
+          borderWidth: 2,
+        },
+        {
+          label: bLabel,
+          data: normalizedData.benchNorm,
+          borderColor: '#9ca3af',
+          backgroundColor: 'transparent',
+          fill: false,
+          tension: 0.3,
+          pointRadius: 0,
+          pointHoverRadius: 4,
+          borderWidth: 1.5,
+          borderDash: [5, 5],
+          spanGaps: true,
+        },
+      ]
+      if (excessSeriesForChart) {
+        datasets.push({
+          label: excessMode === 'arithmetic' ? '算术超额' : '几何超额',
+          data: excessSeriesForChart,
+          borderColor: '#f97316',
+          backgroundColor: 'transparent',
+          fill: false,
+          tension: 0.3,
+          pointRadius: 0,
+          pointHoverRadius: 4,
+          borderWidth: 1.5,
+          borderDash: [3, 3],
+          spanGaps: true,
+        })
       }
+      return { labels: normalizedData.labels, datasets }
     }
 
     const pointColors = filteredItems.map(i =>
@@ -182,9 +298,9 @@ export default function ChartTab({
         },
       ],
     }
-  }, [chartData, gradient, navType, filteredItems, normalizedData, benchmarkCode, fund])
+  }, [chartData, gradient, navType, filteredItems, normalizedData, benchmarkCode, fund, excessSeriesForChart, excessMode])
 
-  // ── Drawdown overlay ──
+  // ── Drawdown chart ──
   const drawdownSeries = useMemo(() => {
     if (filteredItems.length < 2) return null
     const getVal = item => navType === 'unit' ? item.unit_nav : (item.accumulated_nav ?? item.unit_nav)
@@ -194,12 +310,10 @@ export default function ChartTab({
       if (v > peak) peak = v
       return peak > 0 ? ((v - peak) / peak) * 100 : 0
     })
-    // Only show if there's actual drawdown
     if (Math.min(...dd) >= -0.01) return null
     return dd
   }, [filteredItems, navType])
 
-  // Drawdown chart data
   const drawdownChartData = useMemo(() => {
     if (!drawdownSeries) return null
     return {
@@ -248,6 +362,7 @@ export default function ChartTab({
     },
   }), [])
 
+  // ── Main chart options ──
   const options = useMemo(() => {
     const annotationEntries = {}
 
@@ -291,6 +406,8 @@ export default function ChartTab({
       }
     })
 
+    const excessBase = normalizedData?.fundNorm?.[0] ?? 100
+
     return {
       responsive: true,
       maintainAspectRatio: false,
@@ -304,6 +421,10 @@ export default function ChartTab({
             label: (item) => {
               if (isBenchmarkMode) {
                 const v = Number(item.raw)
+                if (item.datasetIndex === 2) {
+                  const pct = ((v - excessBase) / excessBase * 100).toFixed(2)
+                  return `${item.dataset.label}: ${pct >= 0 ? '+' : ''}${pct}%`
+                }
                 if (navType === 'return') {
                   const sign = v >= 1 ? '+' : ''
                   return `${item.dataset.label}: ${sign}${((v - 1) * 100).toFixed(2)}%`
@@ -346,7 +467,7 @@ export default function ChartTab({
         if (chart.chartArea) setGradient(createGradient(chart.ctx, chart.chartArea))
       },
     }
-  }, [fundIssues, isBenchmarkMode, navType])
+  }, [fundIssues, isBenchmarkMode, navType, normalizedData])
 
   const handleChartRef = useCallback((ref) => {
     chartRef.current = ref
@@ -386,12 +507,13 @@ export default function ChartTab({
   }, [onRetry])
 
   const manualItems = navItems.filter(i => i.source_id === null)
+  const hasBench = !!(benchMetrics && benchmarkCode)
 
   return (
     <div className="space-y-4">
       {/* Chart panel */}
       <div className="bg-white rounded-xl shadow p-4">
-        {/* Benchmark selector row */}
+        {/* Benchmark selector + excess toggle row */}
         <div className="flex flex-wrap items-center gap-2 mb-3">
           <label className="text-xs text-gray-500 shrink-0">基准指数:</label>
           <select
@@ -406,9 +528,31 @@ export default function ChartTab({
             ))}
           </select>
           {isBenchmarkMode && (
-            <span className="text-xs text-gray-400 ml-1">
-              {navType === 'return' ? '（收益率，以1为基准）' : '（净值基数=100，已归一化）'}
-            </span>
+            <>
+              <span className="text-xs text-gray-400">
+                {navType === 'return' ? '（收益率，以1为基准）' : '（净值基数=100，已归一化）'}
+              </span>
+              <div className="flex items-center gap-1 ml-1">
+                <span className="text-xs text-gray-500">超额曲线:</span>
+                {[
+                  { v: 'off',        label: '关' },
+                  { v: 'arithmetic', label: '算术' },
+                  { v: 'geometric',  label: '几何' },
+                ].map(opt => (
+                  <button
+                    key={opt.v}
+                    onClick={() => setExcessMode(opt.v)}
+                    className={`px-2 py-0.5 rounded-full text-xs font-medium transition-colors ${
+                      excessMode === opt.v
+                        ? 'bg-orange-500 text-white'
+                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </>
           )}
         </div>
 
@@ -431,9 +575,7 @@ export default function ChartTab({
             <button
               onClick={() => setIsCustomRange(true)}
               className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-                isCustomRange
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                isCustomRange ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
               }`}
             >
               自定义
@@ -538,7 +680,6 @@ export default function ChartTab({
           </p>
         )}
 
-        {/* Range scrubber — only when there's enough full history to scroll */}
         {!loading && allNavDates.length > 1 && (
           <RangeScrubber
             dates={allNavDates}
@@ -553,8 +694,145 @@ export default function ChartTab({
       {!loading && drawdownChartData && (
         <div className="bg-white rounded-xl shadow p-4">
           <h3 className="text-sm font-semibold text-gray-700 mb-3">动态回撤</h3>
-          <div className="h-40">
+          <div className="h-36 md:h-40">
             <Line data={drawdownChartData} options={drawdownOptions} />
+          </div>
+        </div>
+      )}
+
+      {/* Metrics comparison table */}
+      {!loading && fundMetrics && (
+        <div className="bg-white rounded-xl shadow p-4">
+          <h3 className="text-sm font-semibold text-gray-700 mb-4">业绩指标</h3>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-200 text-gray-500 text-xs">
+                  <th className="text-left py-2 pr-4 font-medium">指标</th>
+                  <th className="text-right py-2 px-4 font-medium">基金</th>
+                  {hasBench && <th className="text-right py-2 px-4 font-medium">基准</th>}
+                  {hasBench && <th className="text-right py-2 pl-4 font-medium">超额</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {METRIC_DEFS.map(m => {
+                  const fundVal = fundMetrics[m.key]
+                  const benchVal = hasBench ? benchMetrics?.[m.key] : null
+                  const excess = (fundVal != null && benchVal != null && m.format === 'pct')
+                    ? fundVal - benchVal
+                    : null
+                  return (
+                    <tr key={m.key} className="border-b border-gray-50 hover:bg-gray-50">
+                      <td className="py-2 pr-4 text-gray-600 text-xs">{m.label}</td>
+                      <td className={`py-2 px-2 md:px-4 text-right font-mono text-xs ${metricColor(fundVal, m.format)}`}>
+                        {formatMetric(fundVal, m.format)}
+                      </td>
+                      {hasBench && (
+                        <td className={`py-2 px-2 md:px-4 text-right font-mono text-xs ${metricColor(benchVal, m.format)}`}>
+                          {formatMetric(benchVal, m.format)}
+                        </td>
+                      )}
+                      {hasBench && (
+                        <td className={`py-2 pl-2 md:pl-4 text-right font-mono text-xs ${metricColor(excess, 'pct')}`}>
+                          {excess != null ? formatMetric(excess, 'pct') : '—'}
+                        </td>
+                      )}
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+          <p className="text-xs text-gray-400 mt-3">
+            区间 {fundMetrics.days} 天 · 无风险利率 2.5%
+          </p>
+        </div>
+      )}
+
+      {/* Benchmark-relative metrics */}
+      {!loading && benchRelativeMetrics && (
+        <div className="bg-white rounded-xl shadow p-4">
+          <h3 className="text-sm font-semibold text-gray-700 mb-4">基准对比指标</h3>
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+            {BENCH_METRIC_DEFS.map(m => {
+              const val = benchRelativeMetrics[m.key]
+              return (
+                <div key={m.key} className="bg-blue-50 rounded-lg p-3">
+                  <p className="text-xs text-gray-500 mb-1">{m.label}</p>
+                  <p className={`text-sm font-semibold font-mono ${metricColor(val, m.format)}`}>
+                    {formatMetric(val, m.format)}
+                  </p>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Excess return metrics */}
+      {!loading && benchmarkCode && excessMetrics && excessMode !== 'off' && (
+        <div className="bg-white rounded-xl shadow p-4">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-sm font-semibold text-gray-700">超额分析</h3>
+            <span className="text-xs text-gray-400">
+              {excessMode === 'arithmetic'
+                ? '算术超额：每期收益率之差累乘'
+                : '几何超额：(1+基金收益)/(1+基准收益)−1 累乘'}
+            </span>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+            {[
+              { key: 'periodExcess',     label: '超额收益率',   format: 'pct' },
+              { key: 'annualizedExcess', label: '年化超额收益', format: 'pct' },
+              { key: 'excessVol',        label: '超额波动率',   format: 'pct' },
+              { key: 'excessMaxDD',      label: '超额最大回撤', format: 'pct' },
+              { key: 'excessSharpe',     label: '超额夏普',     format: 'ratio' },
+            ].map(m => {
+              const val = excessMetrics[m.key]
+              return (
+                <div key={m.key} className="bg-purple-50 rounded-lg p-3">
+                  <p className="text-xs text-gray-500 mb-1">{m.label}</p>
+                  <p className={`text-sm font-semibold font-mono ${metricColor(val, m.format)}`}>
+                    {formatMetric(val, m.format)}
+                  </p>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Top 5 drawdowns */}
+      {!loading && topDrawdowns.length > 0 && (
+        <div className="bg-white rounded-xl shadow p-4">
+          <h3 className="text-sm font-semibold text-gray-700 mb-3">Top {topDrawdowns.length} 回撤</h3>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-gray-200 text-gray-500">
+                  <th className="text-left py-2 font-medium">#</th>
+                  <th className="text-left py-2 font-medium">峰值日期</th>
+                  <th className="text-left py-2 font-medium">谷底日期</th>
+                  <th className="text-left py-2 font-medium">恢复日期</th>
+                  <th className="text-right py-2 font-medium">回撤幅度</th>
+                  <th className="text-right py-2 font-medium">恢复天数</th>
+                </tr>
+              </thead>
+              <tbody>
+                {topDrawdowns.map((dd, i) => (
+                  <tr key={i} className="border-b border-gray-50 hover:bg-gray-50">
+                    <td className="py-2 text-gray-400">{i + 1}</td>
+                    <td className="py-2 text-gray-600">{dd.peakDate}</td>
+                    <td className="py-2 text-gray-600">{dd.troughDate}</td>
+                    <td className="py-2 text-gray-600">{dd.recoveryDate || '未恢复'}</td>
+                    <td className="py-2 text-right font-mono text-red-500">{dd.drawdown.toFixed(2)}%</td>
+                    <td className="py-2 text-right font-mono text-gray-700">
+                      {dd.recoveryDays != null ? `${dd.recoveryDays}天` : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       )}

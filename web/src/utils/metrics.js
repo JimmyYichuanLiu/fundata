@@ -405,9 +405,88 @@ export function computePeriodicReturns(items, navType = 'unit', frequency = 'mon
 }
 
 /**
- * Compute full metrics for each calendar year.
- * Returns array of { year, metrics: { ...computeMetrics result } }
+ * Compute excess return metrics relative to a benchmark.
+ *
+ * mode: 'arithmetic' — daily excess = fund_r - bench_r
+ *       'geometric'  — daily excess = (1+fund_r)/(1+bench_r) - 1
+ *
+ * Returns: { periodExcess, annualizedExcess, excessVol, excessMaxDD, excessSharpe }
+ * All percentage values as numbers (e.g. 5.23 means 5.23%).
  */
+export function computeExcessMetrics(fundItems, benchItems, navType = 'unit', mode = 'arithmetic') {
+  if (!fundItems || !benchItems || fundItems.length < 2 || benchItems.length < 2) return null
+
+  const getVal = item =>
+    navType === 'unit' ? item.unit_nav : (item.accumulated_nav ?? item.unit_nav)
+
+  const fundMap = new Map()
+  fundItems.forEach(item => {
+    const v = getVal(item)
+    if (v != null && !isNaN(v) && item.nav_date) fundMap.set(item.nav_date, v)
+  })
+  const benchMap = new Map()
+  benchItems.forEach(item => {
+    const v = item.unit_nav ?? item.close
+    if (v != null && !isNaN(v) && item.nav_date) benchMap.set(item.nav_date, v)
+  })
+
+  const commonDates = [...fundMap.keys()].filter(d => benchMap.has(d)).sort()
+  if (commonDates.length < 3) return null
+
+  const excessDaily = []
+  const cumSeries = [1]
+
+  for (let i = 1; i < commonDates.length; i++) {
+    const pF = fundMap.get(commonDates[i - 1])
+    const cF = fundMap.get(commonDates[i])
+    const pB = benchMap.get(commonDates[i - 1])
+    const cB = benchMap.get(commonDates[i])
+    if (pF <= 0 || pB <= 0) continue
+    const fR = (cF - pF) / pF
+    const bR = (cB - pB) / pB
+    const e = mode === 'geometric' ? (1 + fR) / (1 + bR) - 1 : fR - bR
+    excessDaily.push(e)
+    cumSeries.push(cumSeries[cumSeries.length - 1] * (1 + e))
+  }
+
+  if (excessDaily.length < 2) return null
+
+  const firstDate = new Date(commonDates[0])
+  const lastDate = new Date(commonDates[commonDates.length - 1])
+  const days = Math.max(1, Math.round((lastDate - firstDate) / (1000 * 60 * 60 * 24)))
+
+  const periodExcess = (cumSeries[cumSeries.length - 1] - 1) * 100
+
+  const annualizedExcess = days >= 30
+    ? (Math.pow(1 + periodExcess / 100, 365 / days) - 1) * 100
+    : null
+
+  const n = excessDaily.length
+  const meanE = excessDaily.reduce((s, v) => s + v, 0) / n
+  const varE = excessDaily.reduce((s, v) => s + (v - meanE) ** 2, 0) / (n - 1)
+  const excessVol = Math.sqrt(varE * 250) * 100
+
+  let excessMaxDD = 0
+  let peak = cumSeries[0]
+  for (let i = 1; i < cumSeries.length; i++) {
+    if (cumSeries[i] > peak) peak = cumSeries[i]
+    const dd = (cumSeries[i] - peak) / peak * 100
+    if (dd < excessMaxDD) excessMaxDD = dd
+  }
+
+  const excessSharpe = (excessVol > 0 && annualizedExcess != null)
+    ? (annualizedExcess / 100) / (excessVol / 100)
+    : null
+
+  return {
+    periodExcess: +periodExcess.toFixed(2),
+    annualizedExcess: annualizedExcess != null ? +annualizedExcess.toFixed(2) : null,
+    excessVol: +excessVol.toFixed(2),
+    excessMaxDD: +excessMaxDD.toFixed(2),
+    excessSharpe: excessSharpe != null ? +excessSharpe.toFixed(3) : null,
+  }
+}
+
 export function computeAnnualMetrics(items, navType = 'unit') {
   if (!items || items.length < 2) return []
 

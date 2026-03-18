@@ -278,6 +278,8 @@ def normalize_date(date_str):
         '%Y-%m-%d',             # 2024-01-30
         '%Y/%m/%d',             # 2024/01/30
         '%Y-%m-%d %H:%M:%S',   # 2024-01-30 00:00:00 (pandas Timestamp字符串)
+        '%Y年%m月%d日',          # 2024年01月30日
+        '%Y年%-m月%-d日',        # 2024年1月30日 (Linux/Mac only, skip on Windows)
     ]
 
     for fmt in formats:

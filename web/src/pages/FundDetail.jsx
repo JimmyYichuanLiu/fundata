@@ -255,18 +255,18 @@ export default function FundDetail() {
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
-      <header className="bg-white border-b border-gray-200 sticky top-0 z-10">
-        <div className="max-w-5xl mx-auto px-4 py-4 flex items-center gap-4">
+      <header className="bg-white border-b border-gray-200 sticky top-14 lg:top-0 z-10">
+        <div className="max-w-5xl mx-auto px-4 py-4 flex items-center gap-4 min-w-0">
           <button
             onClick={() => navigate('/')}
-            className="text-blue-600 hover:text-blue-800 text-sm flex items-center gap-1"
+            className="text-blue-600 hover:text-blue-800 text-sm flex items-center gap-1 shrink-0"
           >
             ← 返回全部基金
           </button>
           {fund && (
-            <div className="flex items-baseline gap-2 ml-2">
-              <h1 className="text-lg font-bold text-gray-900">{fund.product_name || '—'}</h1>
-              <code className="text-xs text-gray-400 font-mono">{fund.product_code}</code>
+            <div className="flex items-baseline gap-2 ml-2 min-w-0 flex-1">
+              <h1 className="text-lg font-bold text-gray-900 truncate">{fund.product_name || '—'}</h1>
+              <code className="text-xs text-gray-400 font-mono shrink-0">{fund.product_code}</code>
             </div>
           )}
         </div>
@@ -308,7 +308,7 @@ export default function FundDetail() {
               </div>
 
               {/* Right: 6 core metrics */}
-              <div className="flex-1 grid grid-cols-3 md:grid-cols-6 gap-4 border-l border-gray-100 pl-6">
+              <div className="flex-1 grid grid-cols-3 md:grid-cols-6 gap-3 md:gap-4 md:border-l md:border-gray-100 md:pl-6">
                 <HeroStat
                   label="累计净值"
                   value={navItems.length > 0 && navItems[navItems.length - 1].accumulated_nav != null
@@ -352,7 +352,7 @@ export default function FundDetail() {
               <button
                 key={tab.key}
                 onClick={() => setActiveTab(tab.key)}
-                className={`px-6 py-3 text-sm font-medium transition-colors relative ${
+                className={`px-4 py-3 md:px-6 text-sm font-medium transition-colors relative ${
                   activeTab === tab.key
                     ? 'text-blue-600'
                     : 'text-gray-500 hover:text-gray-700'

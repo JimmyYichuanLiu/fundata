@@ -429,10 +429,24 @@ def get_or_create_fund_id(conn, product_code: str, product_name: Optional[str] =
 
 
 def db_date_to_api(s: Optional[str]) -> Optional[str]:
-    """Convert YYYYMMDD → YYYY-MM-DD. Returns None for empty/None input."""
-    if not s or len(s) != 8:
+    """Convert YYYYMMDD → YYYY-MM-DD. Returns None for empty/None input.
+    Also handles YYYY年MM月DD日 (Chinese date format) as a fallback.
+    """
+    if not s:
         return s
-    return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+    s = str(s).strip()
+    if len(s) == 8 and s.isdigit():
+        return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+    if len(s) == 10 and s[4] == '-':
+        return s  # already YYYY-MM-DD
+    # Try YYYY年MM月DD日 Chinese format
+    try:
+        from datetime import datetime
+        dt = datetime.strptime(s, "%Y年%m月%d日")
+        return dt.strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    return s
 
 
 def api_date_to_db(s: str) -> str:

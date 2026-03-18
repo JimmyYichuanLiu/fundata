@@ -52,8 +52,8 @@ function metricCellClass(val, format, key) {
   if (key === 'maxDrawdown') {
     return val >= -5 ? 'text-emerald-600' : val >= -15 ? 'text-yellow-600' : 'text-red-500'
   }
-  if (val > 0) return 'text-emerald-600'
-  if (val < 0) return 'text-red-500'
+  if (val > 0) return 'text-red-500'
+  if (val < 0) return 'text-emerald-600'
   return 'text-gray-600'
 }
 
@@ -270,7 +270,7 @@ export default function FundComparison() {
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
-      <header className="bg-white border-b border-gray-200 sticky top-0 z-10">
+      <header className="bg-white border-b border-gray-200 sticky top-14 lg:top-0 z-10">
         <div className="max-w-6xl mx-auto px-4 py-4 flex items-center gap-4">
           <h1 className="text-xl font-bold text-gray-900 flex items-center gap-2">
             <span className="inline-flex items-center justify-center w-8 h-8 bg-purple-600 text-white text-sm font-bold rounded">比</span>
@@ -467,9 +467,9 @@ export default function FundComparison() {
               <table className="w-full text-xs">
                 <thead>
                   <tr className="bg-gray-50 border-b border-gray-200">
-                    <th className="px-4 py-3 text-left text-gray-500 font-medium w-24">指标</th>
+                    <th className="px-2 py-2 md:px-4 md:py-3 text-left text-gray-500 font-medium w-24">指标</th>
                     {metricsTable.map(({ fund, color }) => (
-                      <th key={fund.fund_id} className="px-4 py-3 text-right font-medium" style={{ color }}>
+                      <th key={fund.fund_id} className="px-2 py-2 md:px-4 md:py-3 text-right font-medium" style={{ color }}>
                         <span className="block max-w-[120px] truncate" title={fund.product_name}>
                           {fund.product_name || fund.product_code}
                         </span>
@@ -480,13 +480,13 @@ export default function FundComparison() {
                 <tbody className="divide-y divide-gray-100">
                   {TABLE_METRICS.map(m => (
                     <tr key={m.key} className="hover:bg-gray-50">
-                      <td className="px-4 py-3 text-gray-500">{m.label}</td>
+                      <td className="px-2 py-2 md:px-4 md:py-3 text-gray-500">{m.label}</td>
                       {metricsTable.map(({ fund, metrics }) => {
                         const val = metrics?.[m.key] ?? null
                         return (
                           <td
                             key={fund.fund_id}
-                            className={`px-4 py-3 text-right font-mono font-medium ${metricCellClass(val, m.format, m.key)}`}
+                            className={`px-2 py-2 md:px-4 md:py-3 text-right font-mono font-medium ${metricCellClass(val, m.format, m.key)}`}
                           >
                             {formatMetric(val, m.format)}
                           </td>
@@ -495,9 +495,9 @@ export default function FundComparison() {
                     </tr>
                   ))}
                   <tr className="hover:bg-gray-50">
-                    <td className="px-4 py-3 text-gray-500">区间天数</td>
+                    <td className="px-2 py-2 md:px-4 md:py-3 text-gray-500">区间天数</td>
                     {metricsTable.map(({ fund, metrics }) => (
-                      <td key={fund.fund_id} className="px-4 py-3 text-right text-gray-500">
+                      <td key={fund.fund_id} className="px-2 py-2 md:px-4 md:py-3 text-right text-gray-500">
                         {metrics ? `${metrics.days}天` : '—'}
                       </td>
                     ))}

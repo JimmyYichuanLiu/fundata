@@ -47,32 +47,3 @@
   background: #334155;
 }
 
-/* ── Range Scrubber dual-handle slider ── */
-.range-scrubber-thumb::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: #3b82f6;
-  border: 2px solid #fff;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
-  cursor: grab;
-}
-.range-scrubber-thumb::-moz-range-thumb {
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: #3b82f6;
-  border: 2px solid #fff;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
-  cursor: grab;
-}
-.range-scrubber-thumb::-webkit-slider-thumb:active,
-.range-scrubber-thumb::-moz-range-thumb:active {
-  cursor: grabbing;
-}
-.dark .range-scrubber-thumb::-webkit-slider-thumb,
-.dark .range-scrubber-thumb::-moz-range-thumb {
-  border-color: #1e293b;
-}
