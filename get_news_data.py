@@ -206,6 +206,17 @@ def init_news_db(conn: sqlite3.Connection):
             fetched_at   TEXT    NOT NULL
         )
     """)
+    conn.commit()
+
+    # 向后兼容：若旧库中 priority 列不存在，先 ALTER TABLE 再建索引
+    try:
+        conn.execute("ALTER TABLE crude_news ADD COLUMN priority INTEGER DEFAULT 5")
+        conn.commit()
+        logger.info("crude_news 表：已添加 priority 列（旧库兼容）")
+    except Exception:
+        # 列已存在，忽略
+        pass
+
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_crude_news_published
         ON crude_news(published_at DESC)
@@ -215,16 +226,6 @@ def init_news_db(conn: sqlite3.Connection):
         ON crude_news(priority ASC, published_at DESC)
     """)
     conn.commit()
-
-    # 向后兼容：若旧库中 priority 列不存在，通过 ALTER TABLE 添加
-    try:
-        conn.execute("ALTER TABLE crude_news ADD COLUMN priority INTEGER DEFAULT 5")
-        conn.commit()
-        logger.info("crude_news 表：已添加 priority 列（旧库兼容）")
-    except Exception:
-        # 列已存在，忽略
-        pass
-
     logger.info("crude_news 表初始化完毕")
 
 
