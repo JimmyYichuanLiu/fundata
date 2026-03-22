@@ -11,3 +11,4 @@ pytz>=2023.3
 curl_cffi>=0.7.0
 feedparser>=6.0.0
 yfinance>=0.2.50
+deep-translator>=1.11.0

@@ -20,6 +20,7 @@ import {
   fetchNewsSyncStatus,
   triggerNewsSync,
   fetchNewsSummary,
+  fetchNewsSources,
 } from '../api/crudeApi.js'
 import RangeScrubber from '../components/RangeScrubber.jsx'
 
@@ -648,6 +649,11 @@ export default function CrudeOilComparison() {
                 </div>
               </div>
 
+              {/* focus_text 焦点摘要 */}
+              {summary.focus_text && (
+                <p className="text-xs text-slate-500 dark:text-slate-400 italic mb-2">{summary.focus_text}</p>
+              )}
+
               {/* top3 高优先级新闻 */}
               {summary.last_24h_count === 0 ? (
                 <p className="text-sm text-slate-400">最近24小时暂无新闻</p>
@@ -663,7 +669,7 @@ export default function CrudeOilComparison() {
                           rel="noopener noreferrer"
                           className="text-sm text-slate-800 dark:text-slate-100 hover:text-primary leading-snug line-clamp-1"
                         >
-                          {item.title}
+                          {item.title_zh || item.title}
                         </a>
                         <span className="text-[11px] text-slate-400">{item.source_name}</span>
                       </div>
@@ -724,7 +730,7 @@ export default function CrudeOilComparison() {
                     rel="noopener noreferrer"
                     className="text-sm font-medium text-slate-800 dark:text-slate-100 hover:text-primary leading-snug"
                   >
-                    {item.title}
+                    {item.title_zh || item.title}
                   </a>
                 </div>
                 <span className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded font-medium ${

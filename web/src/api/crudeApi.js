@@ -125,10 +125,19 @@ export async function triggerNewsSync() {
 }
 
 /**
- * 获取今日观察摘要（最近24小时统计 + top3 高优先级新闻）
+ * 获取今日观察摘要（最近24小时统计 + top3 高优先级新闻 + focus_text）
  * @param {AbortSignal} signal
- * @returns {{ last_24h_count, by_category, top3 }}
+ * @returns {{ last_24h_count, by_category, top3, focus_text }}
  */
 export async function fetchNewsSummary(signal) {
   return apiFetch('/api/news/summary', signal)
+}
+
+/**
+ * 获取各新闻源最近一次抓取状态
+ * @param {AbortSignal} signal
+ * @returns {Array<{ source_name, latest_fetch_time, latest_added_count, latest_status, latest_error }>}
+ */
+export async function fetchNewsSources(signal) {
+  return apiFetch('/api/news/sources', signal)
 }

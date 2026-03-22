@@ -18,14 +18,19 @@
 数据库表：crude_news（写入 fund_data.db）
 
 category 合法值：conflict / shipping / crude / official_west / official_iran
-priority：1~10，数值越小越重要（官方源从 2 开始，其余从 5 开始，关键词命中可扣分）
+priority：1~10，数值越小越重要
+  - source_weight：官方源 2，USNI/航运 3，中东视角 4，通用媒体 5
+  - topic_score：命中关键词扣分（Hormuz/tanker -2，missile/sanctions -2，oil/OPEC -1）
+title_zh：中文标题（None=未翻译，""=翻译失败，字符串=成功）
+  - 仅翻译 priority <= 4 的条目，限 200 字符，timeout=5s
 """
 
+import json
 import logging
 import os
 import sqlite3
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Tuple
 from urllib.parse import quote_plus
 
 import feedparser
@@ -40,6 +45,9 @@ logging.basicConfig(
 )
 
 DB_PATH: str = os.getenv("DB_PATH", "fund_data.db")
+
+# 只翻译此优先级及以上（数值越小越重要）
+TRANSLATE_PRIORITY_THRESHOLD = 4
 
 # ---------------------------------------------------------------------------
 # Google News RSS URL 构造
@@ -165,26 +173,63 @@ RSS_FEEDS = [
 ]
 
 # ---------------------------------------------------------------------------
-# priority 计算关键词规则
+# priority 计算：分两层
 # ---------------------------------------------------------------------------
 
-# 命中任意词 → 扣分（累加，最终 priority = max(1, base + 所有扣分之和)，注意扣分为负数）
+# 话题得分规则：命中任意词累加 delta（负数 = 提升优先级）
 _PRIORITY_RULES = [
-    # 格式：(关键词列表, 分值调整量)
     (["Hormuz", "tanker", "shipping", "strait", "Red Sea"], -2),
     (["missile", "strike", "airstrike", "drone strike", "attack", "sanctions", "nuclear"], -2),
     (["oil", "Brent", "WTI", "OPEC", "crude", "barrel"], -1),
 ]
 
 
-def _calc_priority(base: int, title: str, summary: str) -> int:
-    """根据标题+摘要关键词调整 priority，返回 1~10 之间的整数。"""
+def _source_weight(feed_cfg: dict) -> int:
+    """按来源返回基础权重（数值越小越重要）。"""
+    return feed_cfg.get("base_priority", 5)
+
+
+def _topic_score(title: str, summary: str) -> int:
+    """按标题/摘要关键词计算话题调整量（负数 = 提升优先级）。"""
     text = (title + " " + summary).lower()
-    score = base
-    for keywords, delta in _PRIORITY_RULES:
+    delta = 0
+    for keywords, rule_delta in _PRIORITY_RULES:
         if any(kw.lower() in text for kw in keywords):
-            score += delta
-    return max(1, min(10, score))
+            delta += rule_delta
+    return delta
+
+
+def _calc_priority(feed_cfg: dict, title: str, summary: str) -> int:
+    """合成最终 priority，clamp 到 [1, 10]。"""
+    return max(1, min(10, _source_weight(feed_cfg) + _topic_score(title, summary)))
+
+
+# ---------------------------------------------------------------------------
+# 翻译
+# ---------------------------------------------------------------------------
+
+def _translate_to_zh(text: str) -> Optional[str]:
+    """
+    将英文标题翻译为中文。
+    - 仅截取前 200 字符，避免超长标题导致失败
+    - timeout=5s，避免阻塞整个同步流程
+    - 返回 None 表示未安装依赖；返回 "" 表示翻译失败；返回字符串表示成功
+    """
+    try:
+        from deep_translator import GoogleTranslator
+    except ImportError:
+        return None  # 依赖未安装，静默跳过
+
+    text = text[:200].strip()
+    if not text:
+        return None
+
+    try:
+        result = GoogleTranslator(source="auto", target="zh-CN").translate(text)
+        return result if result else ""
+    except Exception as e:
+        logger.debug("翻译失败: %s — %s", text[:40], e)
+        return ""  # 区分：None=未尝试，""=尝试过但失败
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +237,7 @@ def _calc_priority(base: int, title: str, summary: str) -> int:
 # ---------------------------------------------------------------------------
 
 def init_news_db(conn: sqlite3.Connection):
-    """创建 crude_news 表（若不存在），并向后兼容地添加 priority 列。"""
+    """创建 crude_news 表（若不存在），并向后兼容地添加新列。"""
     conn.execute("""
         CREATE TABLE IF NOT EXISTS crude_news (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -203,19 +248,22 @@ def init_news_db(conn: sqlite3.Connection):
             summary      TEXT,
             category     TEXT    DEFAULT 'crude',
             priority     INTEGER DEFAULT 5,
+            title_zh     TEXT    DEFAULT NULL,
             fetched_at   TEXT    NOT NULL
         )
     """)
     conn.commit()
 
-    # 向后兼容：若旧库中 priority 列不存在，先 ALTER TABLE 再建索引
-    try:
-        conn.execute("ALTER TABLE crude_news ADD COLUMN priority INTEGER DEFAULT 5")
-        conn.commit()
-        logger.info("crude_news 表：已添加 priority 列（旧库兼容）")
-    except Exception:
-        # 列已存在，忽略
-        pass
+    # 向后兼容：旧库中缺失的列，用 ALTER TABLE 添加（已存在时忽略）
+    for col_def in [
+        "ALTER TABLE crude_news ADD COLUMN priority INTEGER DEFAULT 5",
+        "ALTER TABLE crude_news ADD COLUMN title_zh TEXT DEFAULT NULL",
+    ]:
+        try:
+            conn.execute(col_def)
+            conn.commit()
+        except Exception:
+            pass  # 列已存在，忽略
 
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_crude_news_published
@@ -257,13 +305,15 @@ def _matches_keywords(title: str, summary: str, keywords: list) -> bool:
 # 单源抓取
 # ---------------------------------------------------------------------------
 
-def _fetch_feed(conn: sqlite3.Connection, feed_cfg: dict) -> int:
-    """抓取单个 RSS 源，返回新增条数。"""
+def _fetch_feed(conn: sqlite3.Connection, feed_cfg: dict) -> Tuple[int, str]:
+    """
+    抓取单个 RSS 源。
+    返回 (added: int, error: str)，失败时 added=0，error 为错误信息。
+    """
     name = feed_cfg["name"]
     url = feed_cfg["url"]
     keywords = feed_cfg.get("keywords")
     category = feed_cfg["default_category"]
-    base_priority = feed_cfg.get("base_priority", 5)
 
     logger.info("[%s] 开始抓取: %s", name, url[:80])
     try:
@@ -272,13 +322,14 @@ def _fetch_feed(conn: sqlite3.Connection, feed_cfg: dict) -> int:
             request_headers={"User-Agent": "Mozilla/5.0"},
         )
     except Exception as e:
-        logger.error("[%s] feedparser 失败: %s", name, e)
-        return 0
+        err = str(e)
+        logger.error("[%s] feedparser 失败: %s", name, err)
+        return 0, err
 
     entries = parsed.get("entries", [])
     if not entries:
         logger.warning("[%s] 返回 0 条，可能被封锁或 RSS 格式变化", name)
-        return 0
+        return 0, ""
 
     fetched_at = datetime.now(timezone.utc).isoformat()
     added = 0
@@ -296,7 +347,7 @@ def _fetch_feed(conn: sqlite3.Connection, feed_cfg: dict) -> int:
             continue
 
         pub_at = _parse_time(entry)
-        priority = _calc_priority(base_priority, title, summary)
+        priority = _calc_priority(feed_cfg, title, summary)
 
         try:
             conn.execute(
@@ -309,26 +360,55 @@ def _fetch_feed(conn: sqlite3.Connection, feed_cfg: dict) -> int:
             )
             if conn.execute("SELECT changes()").fetchone()[0] > 0:
                 added += 1
+                # 仅翻译高优先级新闻（priority <= 阈值），控制 HTTP 请求量
+                if priority <= TRANSLATE_PRIORITY_THRESHOLD:
+                    title_zh = _translate_to_zh(title)
+                    if title_zh is not None:  # None 表示依赖未安装，不写入
+                        conn.execute(
+                            "UPDATE crude_news SET title_zh = ? WHERE url = ?",
+                            (title_zh, link),
+                        )
         except Exception as e:
             logger.warning("[%s] 插入失败: %s — %s", name, title[:40], e)
 
     conn.commit()
     logger.info("[%s] 新增 %d 条", name, added)
-    return added
+    return added, ""
 
 
 # ---------------------------------------------------------------------------
 # 主入口：供 api.py 调度器调用
 # ---------------------------------------------------------------------------
 
-def connect_and_fetch_news(db_path: str = DB_PATH) -> int:
-    """抓取全部 RSS 源，返回总新增条数。"""
+def connect_and_fetch_news(db_path: str = DB_PATH) -> dict:
+    """
+    抓取全部 RSS 源，返回结果字典：
+    {
+      "total": 292,
+      "per_source": {
+        "USNI News":    {"added": 0,  "status": "ok",    "error": "", "time": "..."},
+        "OilPrice.com": {"added": 5,  "status": "ok",    "error": "", "time": "..."},
+        "IAEA":         {"added": 15, "status": "error", "error": "timeout", "time": "..."},
+      }
+    }
+    """
     conn = sqlite3.connect(db_path, check_same_thread=False)
     try:
         init_news_db(conn)
-        total = sum(_fetch_feed(conn, cfg) for cfg in RSS_FEEDS)
+        total = 0
+        per_source = {}
+        for cfg in RSS_FEEDS:
+            fetch_time = datetime.now(timezone.utc).isoformat()
+            added, error = _fetch_feed(conn, cfg)
+            total += added
+            per_source[cfg["name"]] = {
+                "added":  added,
+                "status": "error" if error else "ok",
+                "error":  error,
+                "time":   fetch_time,
+            }
         logger.info("新闻抓取完毕，共新增 %d 条", total)
-        return total
+        return {"total": total, "per_source": per_source}
     except Exception as e:
         logger.error("新闻抓取整体失败: %s", e, exc_info=True)
         raise
@@ -342,22 +422,30 @@ def connect_and_fetch_news(db_path: str = DB_PATH) -> int:
 
 if __name__ == "__main__":
     print("=== 原油新闻 RSS 抓取（直接运行）===")
-    n = connect_and_fetch_news()
-    print(f"完成，新增 {n} 条")
+    result = connect_and_fetch_news()
+    print(f"完成，新增 {result['total']} 条")
+
+    print("\n--- 各源状态 ---")
+    for src, info in result["per_source"].items():
+        status = info["status"]
+        added = info["added"]
+        err = f" [{info['error']}]" if info["error"] else ""
+        print(f"  {src}: {status}, +{added}{err}")
 
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
-        "SELECT priority, source_name, category, title "
+        "SELECT priority, source_name, category, title_zh, title "
         "FROM crude_news ORDER BY priority ASC, published_at DESC LIMIT 15"
     ).fetchall()
     print("\n--- 最高优先级 15 条 ---")
     for r in rows:
-        print(r)
+        display = r[3] if r[3] else r[4]
+        print(f"  [{r[0]}] {r[1]} ({r[2]}): {display[:60]}")
 
     print("\n--- 各分类统计 ---")
     cats = conn.execute(
         "SELECT category, COUNT(*) FROM crude_news GROUP BY category"
     ).fetchall()
     for c in cats:
-        print(c)
+        print(f"  {c[0]}: {c[1]}")
     conn.close()

@@ -7,13 +7,15 @@
 
 端点：
   GET  /api/news                 — 新闻列表（支持 category / limit / offset）
-  GET  /api/news/summary         — 今日观察摘要（最近24小时统计 + top3）
+  GET  /api/news/summary         — 今日观察摘要（最近24小时统计 + top3 + focus_text）
+  GET  /api/news/sources         — 各新闻源最近一次抓取状态
   GET  /api/news/sync/status     — 同步状态
   POST /api/news/sync/trigger    — 手动触发同步
 
 category 合法值：conflict / shipping / crude / official_west / official_iran
 """
 
+import json
 import logging
 import os
 import sqlite3
@@ -35,6 +37,15 @@ _news_sync_lock = threading.Lock()
 
 # 合法的 category 值
 VALID_CATEGORIES = {"conflict", "shipping", "crude", "official_west", "official_iran"}
+
+# 分类中文名（用于 focus_text 生成）
+_CATEGORY_ZH = {
+    "conflict":      "冲突动态",
+    "shipping":      "航运运输",
+    "crude":         "原油市场",
+    "official_west": "欧美官方",
+    "official_iran": "伊朗官方",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +87,21 @@ def _ensure_table():
         conn.close()
 
 
+def _make_focus_text(last_24h_count: int, by_category: dict) -> str:
+    """根据分类统计生成规则性摘要文字（最多2个分类）。"""
+    if last_24h_count == 0:
+        return "最近24小时暂无新闻"
+    top_cats = sorted(
+        [(k, v) for k, v in by_category.items() if v > 0],
+        key=lambda x: x[1],
+        reverse=True,
+    )[:2]
+    if not top_cats:
+        return f"最近24小时共 {last_24h_count} 条新闻"
+    focus = "、".join(_CATEGORY_ZH.get(k, k) for k, _ in top_cats)
+    return f"最近24小时共 {last_24h_count} 条新闻，焦点集中在{focus}"
+
+
 # ---------------------------------------------------------------------------
 # 后台同步任务（线程安全）
 # ---------------------------------------------------------------------------
@@ -87,11 +113,16 @@ def _run_news_sync():
     try:
         _set_sync_key("news_last_status", "running")
         _set_sync_key("news_last_time", datetime.now().isoformat())
-        added = connect_and_fetch_news(DB_PATH)
+        result = connect_and_fetch_news(DB_PATH)
+        total = result["total"]
+        per_source = result["per_source"]
+
         _set_sync_key("news_last_status", "success")
-        _set_sync_key("news_last_added", str(added))
+        _set_sync_key("news_last_added", str(total))
         _set_sync_key("news_last_error", "")
-        logger.info("新闻同步完毕，新增 %d 条", added)
+        # 持久化逐源状态（JSON 字符串）
+        _set_sync_key("news_source_status", json.dumps(per_source, ensure_ascii=False))
+        logger.info("新闻同步完毕，新增 %d 条", total)
     except Exception as e:
         logger.error("新闻后台同步失败: %s", e, exc_info=True)
         _set_sync_key("news_last_status", "error")
@@ -128,6 +159,48 @@ def trigger_news_sync(background_tasks: BackgroundTasks):
 
 
 # ---------------------------------------------------------------------------
+# GET /api/news/sources  — 各新闻源最近一次抓取状态
+# ---------------------------------------------------------------------------
+
+@news_router.get("/sources", summary="各新闻源抓取状态")
+def get_news_sources():
+    """
+    返回各新闻源最近一次抓取状态列表。
+    首次同步前返回空数组。
+
+    响应格式：
+    [
+      {
+        "source_name": "USNI News",
+        "latest_fetch_time": "2026-03-22T22:34:00+00:00",
+        "latest_added_count": 0,
+        "latest_status": "ok",
+        "latest_error": ""
+      },
+      ...
+    ]
+    """
+    raw = _get_sync_key("news_source_status")
+    if not raw:
+        return []
+    try:
+        per_source = json.loads(raw)
+    except Exception:
+        return []
+
+    result = []
+    for name, info in per_source.items():
+        result.append({
+            "source_name":         name,
+            "latest_fetch_time":   info.get("time", ""),
+            "latest_added_count":  info.get("added", 0),
+            "latest_status":       info.get("status", ""),
+            "latest_error":        info.get("error", ""),
+        })
+    return result
+
+
+# ---------------------------------------------------------------------------
 # GET /api/news/summary  — 今日观察摘要
 # ---------------------------------------------------------------------------
 
@@ -135,28 +208,16 @@ def trigger_news_sync(background_tasks: BackgroundTasks):
 def get_news_summary():
     """
     返回最近 24 小时的新闻统计与高优先级摘要。
+    时间口径：优先使用 published_at，缺失时回退 fetched_at。
 
     响应格式：
     {
       "last_24h_count": 23,
-      "by_category": {
-        "conflict": 8,
-        "shipping": 3,
-        "crude": 7,
-        "official_west": 3,
-        "official_iran": 2
-      },
+      "by_category": { "conflict": 8, "shipping": 3, ... },
       "top3": [
-        {
-          "id": 1,
-          "title": "...",
-          "url": "...",
-          "source_name": "IAEA",
-          "published_at": "2025-03-21T12:00:00+00:00",
-          "category": "official_west",
-          "priority": 2
-        }
-      ]
+        { "id", "title", "title_zh", "url", "source_name", "published_at", "category", "priority" }
+      ],
+      "focus_text": "最近24小时共23条新闻，焦点集中在航运运输、欧美官方"
     }
     """
     _ensure_table()
@@ -164,10 +225,12 @@ def get_news_summary():
     try:
         # 最近 24 小时的时间阈值（ISO 8601）
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        # 优先使用 published_at，缺失时回退 fetched_at
+        time_expr = "COALESCE(published_at, fetched_at)"
 
         # 总数
         total_row = conn.execute(
-            "SELECT COUNT(*) FROM crude_news WHERE fetched_at >= ?",
+            f"SELECT COUNT(*) FROM crude_news WHERE {time_expr} >= ?",
             (cutoff,),
         ).fetchone()
         last_24h_count = total_row[0] if total_row else 0
@@ -175,10 +238,10 @@ def get_news_summary():
         # 按分类统计
         by_category = {cat: 0 for cat in VALID_CATEGORIES}
         cat_rows = conn.execute(
-            """
+            f"""
             SELECT category, COUNT(*) as cnt
             FROM crude_news
-            WHERE fetched_at >= ?
+            WHERE {time_expr} >= ?
             GROUP BY category
             """,
             (cutoff,),
@@ -190,10 +253,10 @@ def get_news_summary():
 
         # top3：优先级最高（priority 最小）的前 3 条
         top3_rows = conn.execute(
-            """
-            SELECT id, title, url, source_name, published_at, category, priority
+            f"""
+            SELECT id, title, title_zh, url, source_name, published_at, category, priority
             FROM crude_news
-            WHERE fetched_at >= ?
+            WHERE {time_expr} >= ?
             ORDER BY priority ASC, published_at DESC
             LIMIT 3
             """,
@@ -201,10 +264,13 @@ def get_news_summary():
         ).fetchall()
         top3 = [dict(r) for r in top3_rows]
 
+        focus_text = _make_focus_text(last_24h_count, by_category)
+
         return {
             "last_24h_count": last_24h_count,
-            "by_category": by_category,
-            "top3": top3,
+            "by_category":    by_category,
+            "top3":           top3,
+            "focus_text":     focus_text,
         }
     finally:
         conn.close()
@@ -233,14 +299,8 @@ def list_news(
       "limit": 50,
       "items": [
         {
-          "id": 1,
-          "title": "...",
-          "url": "https://...",
-          "source_name": "USNI News",
-          "published_at": "2025-03-21T12:00:00+00:00",
-          "summary": "...",
-          "category": "conflict",
-          "priority": 3
+          "id", "title", "title_zh", "url", "source_name",
+          "published_at", "summary", "category", "priority"
         },
         ...
       ]
@@ -263,7 +323,7 @@ def list_news(
 
         rows = conn.execute(
             f"""
-            SELECT id, title, url, source_name, published_at, summary, category, priority
+            SELECT id, title, title_zh, url, source_name, published_at, summary, category, priority
             FROM crude_news {where}
             ORDER BY priority ASC, published_at DESC
             LIMIT ? OFFSET ?
