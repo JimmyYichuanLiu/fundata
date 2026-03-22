@@ -123,3 +123,12 @@ export async function triggerNewsSync() {
   }
   return res.json()
 }
+
+/**
+ * 获取今日观察摘要（最近24小时统计 + top3 高优先级新闻）
+ * @param {AbortSignal} signal
+ * @returns {{ last_24h_count, by_category, top3 }}
+ */
+export async function fetchNewsSummary(signal) {
+  return apiFetch('/api/news/summary', signal)
+}

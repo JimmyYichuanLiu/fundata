@@ -19,6 +19,7 @@ import {
   fetchCrudeNews,
   fetchNewsSyncStatus,
   triggerNewsSync,
+  fetchNewsSummary,
 } from '../api/crudeApi.js'
 import RangeScrubber from '../components/RangeScrubber.jsx'
 
@@ -47,6 +48,40 @@ const SYMBOL_META = {
   WTI:   { label: 'WTI原油',    unit: 'USD/桶', yAxis: 'y'  },
   BRENT: { label: 'Brent原油',  unit: 'USD/桶', yAxis: 'y'  },
   SC:    { label: '上海原油SC', unit: 'CNY/桶', yAxis: 'y1' },
+}
+
+// 新闻分类配置
+const NEWS_CATEGORIES = [
+  { key: '',               label: '全部'   },
+  { key: 'conflict',      label: '冲突'   },
+  { key: 'shipping',      label: '运输'   },
+  { key: 'crude',         label: '原油'   },
+  { key: 'official_west', label: '欧美官方' },
+  { key: 'official_iran', label: '伊朗官方' },
+]
+
+// 分类标签样式
+const CATEGORY_BADGE = {
+  conflict:      'bg-rose-100 text-rose-600 dark:bg-rose-900/30 dark:text-rose-400',
+  shipping:      'bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400',
+  crude:         'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400',
+  official_west: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400',
+  official_iran: 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400',
+}
+
+const CATEGORY_LABEL = {
+  conflict:      '冲突',
+  shipping:      '运输',
+  crude:         '原油',
+  official_west: '欧美官方',
+  official_iran: '伊朗官方',
+}
+
+// priority 颜色指示点
+function priorityDot(priority) {
+  if (priority <= 2) return 'bg-red-500'
+  if (priority <= 4) return 'bg-orange-400'
+  return 'bg-yellow-400'
 }
 
 // ---------------------------------------------------------------------------
@@ -104,11 +139,15 @@ export default function CrudeOilComparison() {
   // 新闻状态
   const [newsItems,      setNewsItems]      = useState([])
   const [newsTotal,      setNewsTotal]      = useState(0)
-  const [newsCategory,   setNewsCategory]   = useState('')      // '' | 'conflict' | 'crude'
+  const [newsCategory,   setNewsCategory]   = useState('')
   const [newsLoading,    setNewsLoading]    = useState(false)
   const [newsSyncing,    setNewsSyncing]    = useState(false)
   const [newsSyncStatus, setNewsSyncStatus] = useState(null)
   const [newsSyncMsg,    setNewsSyncMsg]    = useState('')
+
+  // 今日观察摘要
+  const [summary,        setSummary]        = useState(null)
+  const [summaryLoading, setSummaryLoading] = useState(false)
 
   // ── 计算查询参数 ───────────────────────────────────────────────────────────
 
@@ -183,6 +222,26 @@ export default function CrudeOilComparison() {
     }
   }
 
+  // ── 今日观察摘要 ──────────────────────────────────────────────────────────
+
+  const loadSummary = useCallback(async (signal) => {
+    setSummaryLoading(true)
+    try {
+      const res = await fetchNewsSummary(signal)
+      setSummary(res)
+    } catch (e) {
+      if (e.name !== 'AbortError') console.error('summary fetch error', e)
+    } finally {
+      setSummaryLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    const ac = new AbortController()
+    loadSummary(ac.signal)
+    return () => ac.abort()
+  }, [loadSummary])
+
   // ── 新闻加载 ───────────────────────────────────────────────────────────────
 
   const loadNews = useCallback(async (signal) => {
@@ -219,6 +278,7 @@ export default function CrudeOilComparison() {
         if (s) setNewsSyncStatus(s)
         const ac = new AbortController()
         loadNews(ac.signal)
+        loadSummary(ac.signal)
       }, 35000)
     } catch (e) {
       setNewsSyncMsg(`失败: ${e.message}`)
@@ -518,33 +578,14 @@ export default function CrudeOilComparison() {
         {/* 新闻区标题行 */}
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h2 className="text-lg font-semibold">中东冲突与原油新闻</h2>
+            <h2 className="text-lg font-semibold">中东冲突与原油观察</h2>
             <p className="text-xs text-slate-400 mt-0.5">
-              来源：USNI News · OilPrice.com · Al Jazeera
+              来源：USNI News · OilPrice.com · Al Jazeera · IAEA · Iran International · White House · State Dept · The National · Reuters Energy · 航运聚合
               {newsTotal > 0 && <span className="ml-2">共 {newsTotal} 条</span>}
             </p>
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
-            {/* 分类筛选 */}
-            {[
-              { key: '',         label: '全部'   },
-              { key: 'conflict', label: '冲突动态' },
-              { key: 'crude',    label: '原油市场' },
-            ].map(({ key, label }) => (
-              <button
-                key={key}
-                onClick={() => setNewsCategory(key)}
-                className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-                  newsCategory === key
-                    ? 'bg-primary text-white'
-                    : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-
             {/* 同步状态 */}
             {newsSyncStatus && (
               <span className={`text-xs px-2 py-1 rounded-full font-medium ${statusBadge(newsSyncStatus.last_status)}`}>
@@ -570,6 +611,91 @@ export default function CrudeOilComparison() {
           </div>
         )}
 
+        {/* 今日观察摘要卡片 */}
+        <div className="bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-200 dark:border-slate-700 p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">今日观察</span>
+            <span className="text-xs text-slate-400">最近24小时</span>
+          </div>
+
+          {summaryLoading && (
+            <div className="space-y-2">
+              {[1, 2, 3].map(i => (
+                <div key={i} className="h-4 bg-slate-200 dark:bg-slate-700 rounded animate-pulse" />
+              ))}
+            </div>
+          )}
+
+          {!summaryLoading && summary && (
+            <>
+              {/* 统计行 */}
+              <div className="flex flex-wrap items-center gap-3 mb-3">
+                <span className="text-sm font-medium text-slate-700 dark:text-slate-200">
+                  {summary.last_24h_count} 条新闻
+                </span>
+                <div className="flex flex-wrap gap-2">
+                  {Object.entries(summary.by_category || {})
+                    .filter(([, cnt]) => cnt > 0)
+                    .map(([cat, cnt]) => (
+                      <span
+                        key={cat}
+                        className={`text-[11px] px-1.5 py-0.5 rounded font-medium ${CATEGORY_BADGE[cat] || 'bg-slate-100 text-slate-500'}`}
+                      >
+                        {CATEGORY_LABEL[cat] || cat} {cnt}
+                      </span>
+                    ))
+                  }
+                </div>
+              </div>
+
+              {/* top3 高优先级新闻 */}
+              {summary.last_24h_count === 0 ? (
+                <p className="text-sm text-slate-400">最近24小时暂无新闻</p>
+              ) : (
+                <div className="space-y-2">
+                  {(summary.top3 || []).map(item => (
+                    <div key={item.id} className="flex items-start gap-2">
+                      <span className={`mt-1.5 shrink-0 w-2 h-2 rounded-full ${priorityDot(item.priority)}`} />
+                      <div className="min-w-0">
+                        <a
+                          href={item.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-sm text-slate-800 dark:text-slate-100 hover:text-primary leading-snug line-clamp-1"
+                        >
+                          {item.title}
+                        </a>
+                        <span className="text-[11px] text-slate-400">{item.source_name}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+
+          {!summaryLoading && !summary && (
+            <p className="text-sm text-slate-400">请先点击「抓取新闻」加载数据</p>
+          )}
+        </div>
+
+        {/* 分类筛选按钮 */}
+        <div className="flex flex-wrap items-center gap-2">
+          {NEWS_CATEGORIES.map(({ key, label }) => (
+            <button
+              key={key}
+              onClick={() => setNewsCategory(key)}
+              className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                newsCategory === key
+                  ? 'bg-primary text-white'
+                  : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
         {/* 新闻列表 */}
         <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm divide-y divide-slate-100 dark:divide-slate-800">
           {newsLoading && (
@@ -589,23 +715,25 @@ export default function CrudeOilComparison() {
           {!newsLoading && newsItems.map(item => (
             <div key={item.id} className="px-4 py-3 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
               <div className="flex items-start justify-between gap-3">
-                <a
-                  href={item.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-sm font-medium text-slate-800 dark:text-slate-100 hover:text-primary leading-snug flex-1"
-                >
-                  {item.title}
-                </a>
+                <div className="flex items-start gap-2 flex-1 min-w-0">
+                  {/* 优先度颜色点 */}
+                  <span className={`mt-1.5 shrink-0 w-2 h-2 rounded-full ${priorityDot(item.priority ?? 5)}`} />
+                  <a
+                    href={item.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-sm font-medium text-slate-800 dark:text-slate-100 hover:text-primary leading-snug"
+                  >
+                    {item.title}
+                  </a>
+                </div>
                 <span className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded font-medium ${
-                  item.category === 'conflict'
-                    ? 'bg-rose-100 text-rose-600 dark:bg-rose-900/30 dark:text-rose-400'
-                    : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'
+                  CATEGORY_BADGE[item.category] || 'bg-slate-100 text-slate-500'
                 }`}>
-                  {item.category === 'conflict' ? '冲突' : '原油'}
+                  {CATEGORY_LABEL[item.category] || item.category}
                 </span>
               </div>
-              <div className="flex items-center gap-3 mt-1.5 text-xs text-slate-400">
+              <div className="flex items-center gap-3 mt-1.5 ml-4 text-xs text-slate-400">
                 <span>{item.source_name}</span>
                 {item.published_at && (
                   <span>{item.published_at.slice(0, 16).replace('T', ' ')}</span>
