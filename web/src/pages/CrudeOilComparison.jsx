@@ -21,6 +21,7 @@ import {
   triggerNewsSync,
   fetchNewsSummary,
   fetchNewsSources,
+  fetchHormuzNews,
 } from '../api/crudeApi.js'
 import RangeScrubber from '../components/RangeScrubber.jsx'
 
@@ -149,6 +150,14 @@ export default function CrudeOilComparison() {
   // 今日观察摘要
   const [summary,        setSummary]        = useState(null)
   const [summaryLoading, setSummaryLoading] = useState(false)
+  const [statsRange,     setStatsRange]     = useState('24h')   // '24h' | '7d' | '30d'
+
+  // Hormuz 观察
+  const [hormuzItems,   setHormuzItems]   = useState([])
+  const [hormuzLoading, setHormuzLoading] = useState(false)
+
+  // 新闻排序
+  const [newsSort, setNewsSort] = useState('time')  // 'time' | 'relevance'
 
   // ── 计算查询参数 ───────────────────────────────────────────────────────────
 
@@ -248,7 +257,7 @@ export default function CrudeOilComparison() {
   const loadNews = useCallback(async (signal) => {
     setNewsLoading(true)
     try {
-      const res = await fetchCrudeNews({ category: newsCategory || undefined, limit: 50 }, signal)
+      const res = await fetchCrudeNews({ category: newsCategory || undefined, limit: 50, sort: newsSort }, signal)
       setNewsItems(res.items || [])
       setNewsTotal(res.total || 0)
     } catch (e) {
@@ -256,7 +265,7 @@ export default function CrudeOilComparison() {
     } finally {
       setNewsLoading(false)
     }
-  }, [newsCategory])
+  }, [newsCategory, newsSort])
 
   useEffect(() => {
     const ac = new AbortController()
@@ -267,6 +276,25 @@ export default function CrudeOilComparison() {
   useEffect(() => {
     fetchNewsSyncStatus().then(setNewsSyncStatus).catch(() => {})
   }, [])
+
+  // Hormuz 新闻加载
+  const loadHormuz = useCallback(async (signal) => {
+    setHormuzLoading(true)
+    try {
+      const res = await fetchHormuzNews(10, signal)
+      setHormuzItems(res || [])
+    } catch (e) {
+      if (e.name !== 'AbortError') console.error('hormuz fetch error', e)
+    } finally {
+      setHormuzLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    const ac = new AbortController()
+    loadHormuz(ac.signal)
+    return () => ac.abort()
+  }, [loadHormuz])
 
   async function handleNewsSync() {
     setNewsSyncing(true)
@@ -280,6 +308,7 @@ export default function CrudeOilComparison() {
         const ac = new AbortController()
         loadNews(ac.signal)
         loadSummary(ac.signal)
+        loadHormuz(ac.signal)
       }, 35000)
     } catch (e) {
       setNewsSyncMsg(`失败: ${e.message}`)
@@ -616,7 +645,22 @@ export default function CrudeOilComparison() {
         <div className="bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-200 dark:border-slate-700 p-4">
           <div className="flex items-center gap-2 mb-3">
             <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">今日观察</span>
-            <span className="text-xs text-slate-400">最近24小时</span>
+            {/* 时间维度切换 */}
+            <div className="flex items-center gap-1 ml-2">
+              {[['24h', '24小时'], ['7d', '7天'], ['30d', '30天']].map(([key, label]) => (
+                <button
+                  key={key}
+                  onClick={() => setStatsRange(key)}
+                  className={`px-2 py-0.5 rounded text-[11px] font-medium transition-colors ${
+                    statsRange === key
+                      ? 'bg-primary text-white'
+                      : 'bg-slate-200 dark:bg-slate-700 text-slate-500 dark:text-slate-400 hover:bg-slate-300 dark:hover:bg-slate-600'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
           </div>
 
           {summaryLoading && (
@@ -627,79 +671,158 @@ export default function CrudeOilComparison() {
             </div>
           )}
 
-          {!summaryLoading && summary && (
-            <>
-              {/* 统计行 */}
-              <div className="flex flex-wrap items-center gap-3 mb-3">
-                <span className="text-sm font-medium text-slate-700 dark:text-slate-200">
-                  {summary.last_24h_count} 条新闻
-                </span>
-                <div className="flex flex-wrap gap-2">
-                  {Object.entries(summary.by_category || {})
-                    .filter(([, cnt]) => cnt > 0)
-                    .map(([cat, cnt]) => (
-                      <span
-                        key={cat}
-                        className={`text-[11px] px-1.5 py-0.5 rounded font-medium ${CATEGORY_BADGE[cat] || 'bg-slate-100 text-slate-500'}`}
-                      >
-                        {CATEGORY_LABEL[cat] || cat} {cnt}
-                      </span>
-                    ))
-                  }
-                </div>
-              </div>
-
-              {/* focus_text 焦点摘要 */}
-              {summary.focus_text && (
-                <p className="text-xs text-slate-500 dark:text-slate-400 italic mb-2">{summary.focus_text}</p>
-              )}
-
-              {/* top3 高优先级新闻 */}
-              {summary.last_24h_count === 0 ? (
-                <p className="text-sm text-slate-400">最近24小时暂无新闻</p>
-              ) : (
-                <div className="space-y-2">
-                  {(summary.top3 || []).map(item => (
-                    <div key={item.id} className="flex items-start gap-2">
-                      <span className={`mt-1.5 shrink-0 w-2 h-2 rounded-full ${priorityDot(item.priority)}`} />
-                      <div className="min-w-0">
-                        <a
-                          href={item.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-sm text-slate-800 dark:text-slate-100 hover:text-primary leading-snug line-clamp-1"
+          {!summaryLoading && summary && (() => {
+            // 根据选中的时间段取对应分类统计
+            const byCategory = statsRange === '7d'
+              ? (summary.by_category_7d || {})
+              : statsRange === '30d'
+              ? (summary.by_category_30d || {})
+              : (summary.by_category || {})
+            const totalCount = statsRange === '24h'
+              ? summary.last_24h_count
+              : Object.values(byCategory).reduce((a, b) => a + b, 0)
+            return (
+              <>
+                {/* 统计行 */}
+                <div className="flex flex-wrap items-center gap-3 mb-3">
+                  <span className="text-sm font-medium text-slate-700 dark:text-slate-200">
+                    {totalCount} 条新闻
+                  </span>
+                  <div className="flex flex-wrap gap-2">
+                    {Object.entries(byCategory)
+                      .filter(([, cnt]) => cnt > 0)
+                      .map(([cat, cnt]) => (
+                        <span
+                          key={cat}
+                          className={`text-[11px] px-1.5 py-0.5 rounded font-medium ${CATEGORY_BADGE[cat] || 'bg-slate-100 text-slate-500'}`}
                         >
-                          {item.title_zh || item.title}
-                        </a>
-                        <span className="text-[11px] text-slate-400">{item.source_name}</span>
-                      </div>
-                    </div>
-                  ))}
+                          {CATEGORY_LABEL[cat] || cat} {cnt}
+                        </span>
+                      ))
+                    }
+                  </div>
                 </div>
-              )}
-            </>
-          )}
+
+                {/* focus_text 焦点摘要（仅24小时模式显示） */}
+                {statsRange === '24h' && summary.focus_text && (
+                  <p className="text-xs text-slate-500 dark:text-slate-400 italic mb-2">{summary.focus_text}</p>
+                )}
+
+                {/* top5 高优先级新闻（仅24小时模式显示） */}
+                {statsRange === '24h' && (
+                  summary.last_24h_count === 0 ? (
+                    <p className="text-sm text-slate-400">最近24小时暂无新闻</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {(summary.top5 || []).map(item => (
+                        <div key={item.id} className="flex items-start gap-2">
+                          <span className={`mt-1.5 shrink-0 w-2 h-2 rounded-full ${priorityDot(item.priority)}`} />
+                          <div className="min-w-0">
+                            <a
+                              href={item.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              title={item.title_zh ? item.title : undefined}
+                              className="text-sm text-slate-800 dark:text-slate-100 hover:text-primary leading-snug line-clamp-1"
+                            >
+                              {item.title_zh || item.title}
+                            </a>
+                            <span className="text-[11px] text-slate-400">{item.source_name}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )
+                )}
+              </>
+            )
+          })()}
 
           {!summaryLoading && !summary && (
             <p className="text-sm text-slate-400">请先点击「抓取新闻」加载数据</p>
           )}
         </div>
 
-        {/* 分类筛选按钮 */}
-        <div className="flex flex-wrap items-center gap-2">
-          {NEWS_CATEGORIES.map(({ key, label }) => (
-            <button
-              key={key}
-              onClick={() => setNewsCategory(key)}
-              className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-                newsCategory === key
-                  ? 'bg-primary text-white'
-                  : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
-              }`}
-            >
-              {label}
-            </button>
-          ))}
+        {/* Hormuz / 航运观察 */}
+        <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">航运 / Hormuz 观察</span>
+            <span className="text-xs text-slate-400">关键词：Hormuz · tanker · Red Sea · shipping · strait</span>
+          </div>
+          {hormuzLoading && (
+            <div className="flex items-center gap-2 text-slate-400 text-sm">
+              <span className="material-symbols-outlined animate-spin text-base">progress_activity</span>
+              加载中…
+            </div>
+          )}
+          {!hormuzLoading && hormuzItems.length === 0 && (
+            <p className="text-sm text-slate-400">暂无相关新闻</p>
+          )}
+          {!hormuzLoading && hormuzItems.length > 0 && (
+            <div className="space-y-2">
+              {hormuzItems.map(item => (
+                <div key={item.id} className="flex items-start gap-2">
+                  <span className={`mt-1.5 shrink-0 w-2 h-2 rounded-full ${priorityDot(item.priority)}`} />
+                  <div className="min-w-0 flex-1">
+                    <a
+                      href={item.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title={item.title_zh ? item.title : undefined}
+                      className="text-sm text-slate-800 dark:text-slate-100 hover:text-primary leading-snug line-clamp-1"
+                    >
+                      {item.title_zh || item.title}
+                    </a>
+                    <div className="flex items-center gap-2 mt-0.5 text-[11px] text-slate-400">
+                      <span>{item.source_name}</span>
+                      {item.published_at && (
+                        <span>{item.published_at.slice(0, 16).replace('T', ' ')}</span>
+                      )}
+                      <span className={`px-1.5 py-0.5 rounded font-medium ${CATEGORY_BADGE[item.category] || 'bg-slate-100 text-slate-500'}`}>
+                        {CATEGORY_LABEL[item.category] || item.category}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* 分类筛选按钮 + 排序切换 */}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {NEWS_CATEGORIES.map(({ key, label }) => (
+              <button
+                key={key}
+                onClick={() => setNewsCategory(key)}
+                className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                  newsCategory === key
+                    ? 'bg-primary text-white'
+                    : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {/* 排序方式 */}
+          <div className="flex items-center gap-1">
+            <span className="text-xs text-slate-400 mr-1">排序：</span>
+            {[['time', '最新时间'], ['relevance', '相关度']].map(([key, label]) => (
+              <button
+                key={key}
+                onClick={() => setNewsSort(key)}
+                className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
+                  newsSort === key
+                    ? 'bg-slate-700 text-white'
+                    : 'bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
 
         {/* 新闻列表 */}
@@ -728,6 +851,7 @@ export default function CrudeOilComparison() {
                     href={item.url}
                     target="_blank"
                     rel="noopener noreferrer"
+                    title={item.title_zh ? item.title : undefined}
                     className="text-sm font-medium text-slate-800 dark:text-slate-100 hover:text-primary leading-snug"
                   >
                     {item.title_zh || item.title}

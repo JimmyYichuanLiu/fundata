@@ -93,7 +93,7 @@ export function daysAgoYYYYMMDD(n) {
 
 /**
  * 获取新闻列表
- * @param {Object} opts - { category: 'conflict'|'crude', limit, offset }
+ * @param {Object} opts - { category, limit, offset, sort: 'time'|'relevance' }
  * @param {AbortSignal} signal
  */
 export async function fetchCrudeNews(opts = {}, signal) {
@@ -101,6 +101,7 @@ export async function fetchCrudeNews(opts = {}, signal) {
   if (opts.category) params.set('category', opts.category)
   if (opts.limit  != null) params.set('limit',  opts.limit)
   if (opts.offset != null) params.set('offset', opts.offset)
+  if (opts.sort)           params.set('sort',   opts.sort)
   const qs = params.toString()
   return apiFetch(`/api/news${qs ? '?' + qs : ''}`, signal)
 }
@@ -125,9 +126,9 @@ export async function triggerNewsSync() {
 }
 
 /**
- * 获取今日观察摘要（最近24小时统计 + top3 高优先级新闻 + focus_text）
+ * 获取今日观察摘要（最近24小时统计 + top5 高优先级新闻 + 7天/30天统计 + focus_text）
  * @param {AbortSignal} signal
- * @returns {{ last_24h_count, by_category, top3, focus_text }}
+ * @returns {{ last_24h_count, by_category, by_category_7d, by_category_30d, top5, focus_text }}
  */
 export async function fetchNewsSummary(signal) {
   return apiFetch('/api/news/summary', signal)
@@ -140,4 +141,14 @@ export async function fetchNewsSummary(signal) {
  */
 export async function fetchNewsSources(signal) {
   return apiFetch('/api/news/sources', signal)
+}
+
+/**
+ * 获取 Hormuz / 航运相关新闻
+ * @param {number} limit
+ * @param {AbortSignal} signal
+ * @returns {Array<{ id, title, title_zh, url, source_name, published_at, category, priority }>}
+ */
+export async function fetchHormuzNews(limit = 10, signal) {
+  return apiFetch(`/api/news/hormuz?limit=${limit}`, signal)
 }
