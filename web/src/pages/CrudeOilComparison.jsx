@@ -16,6 +16,9 @@ import {
   triggerCrudeSync,
   daysAgoYYYYMMDD,
   parseCrudeDate,
+  fetchCrudeNews,
+  fetchNewsSyncStatus,
+  triggerNewsSync,
 } from '../api/crudeApi.js'
 import RangeScrubber from '../components/RangeScrubber.jsx'
 
@@ -98,6 +101,15 @@ export default function CrudeOilComparison() {
   const [syncing,    setSyncing]      = useState(false)
   const [syncMsg,    setSyncMsg]      = useState('')
 
+  // 新闻状态
+  const [newsItems,      setNewsItems]      = useState([])
+  const [newsTotal,      setNewsTotal]      = useState(0)
+  const [newsCategory,   setNewsCategory]   = useState('')      // '' | 'conflict' | 'crude'
+  const [newsLoading,    setNewsLoading]    = useState(false)
+  const [newsSyncing,    setNewsSyncing]    = useState(false)
+  const [newsSyncStatus, setNewsSyncStatus] = useState(null)
+  const [newsSyncMsg,    setNewsSyncMsg]    = useState('')
+
   // ── 计算查询参数 ───────────────────────────────────────────────────────────
 
   const queryParams = useCallback(() => {
@@ -168,6 +180,50 @@ export default function CrudeOilComparison() {
       setSyncMsg(`同步失败: ${e.message}`)
     } finally {
       setSyncing(false)
+    }
+  }
+
+  // ── 新闻加载 ───────────────────────────────────────────────────────────────
+
+  const loadNews = useCallback(async (signal) => {
+    setNewsLoading(true)
+    try {
+      const res = await fetchCrudeNews({ category: newsCategory || undefined, limit: 50 }, signal)
+      setNewsItems(res.items || [])
+      setNewsTotal(res.total || 0)
+    } catch (e) {
+      if (e.name !== 'AbortError') console.error('news fetch error', e)
+    } finally {
+      setNewsLoading(false)
+    }
+  }, [newsCategory])
+
+  useEffect(() => {
+    const ac = new AbortController()
+    loadNews(ac.signal)
+    return () => ac.abort()
+  }, [loadNews])
+
+  useEffect(() => {
+    fetchNewsSyncStatus().then(setNewsSyncStatus).catch(() => {})
+  }, [])
+
+  async function handleNewsSync() {
+    setNewsSyncing(true)
+    setNewsSyncMsg('')
+    try {
+      await triggerNewsSync()
+      setNewsSyncMsg('新闻同步已启动，约30秒后完成')
+      setTimeout(async () => {
+        const s = await fetchNewsSyncStatus().catch(() => null)
+        if (s) setNewsSyncStatus(s)
+        const ac = new AbortController()
+        loadNews(ac.signal)
+      }, 35000)
+    } catch (e) {
+      setNewsSyncMsg(`失败: ${e.message}`)
+    } finally {
+      setNewsSyncing(false)
     }
   }
 
@@ -455,6 +511,109 @@ export default function CrudeOilComparison() {
       <div className="text-xs text-slate-400 space-y-1">
         <p>数据来源：WTI / Brent — akshare（新浪财经国际期货）；上海SC — akshare（新浪财经，SC888主力连续合约）</p>
         <p>SC价格为人民币计价（右Y轴），WTI / Brent 为美元计价（左Y轴），单位均为"元/桶"</p>
+      </div>
+
+      {/* ── 中东冲突与原油新闻 ────────────────────────────────────────────── */}
+      <div className="space-y-3">
+        {/* 新闻区标题行 */}
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold">中东冲突与原油新闻</h2>
+            <p className="text-xs text-slate-400 mt-0.5">
+              来源：USNI News · OilPrice.com · Al Jazeera
+              {newsTotal > 0 && <span className="ml-2">共 {newsTotal} 条</span>}
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* 分类筛选 */}
+            {[
+              { key: '',         label: '全部'   },
+              { key: 'conflict', label: '冲突动态' },
+              { key: 'crude',    label: '原油市场' },
+            ].map(({ key, label }) => (
+              <button
+                key={key}
+                onClick={() => setNewsCategory(key)}
+                className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                  newsCategory === key
+                    ? 'bg-primary text-white'
+                    : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+
+            {/* 同步状态 */}
+            {newsSyncStatus && (
+              <span className={`text-xs px-2 py-1 rounded-full font-medium ${statusBadge(newsSyncStatus.last_status)}`}>
+                {newsSyncStatus.last_status === 'success' ? '新闻正常'
+                  : newsSyncStatus.last_status === 'running' ? '同步中'
+                  : newsSyncStatus.last_status === 'never' ? '未同步'
+                  : '同步异常'}
+              </span>
+            )}
+            <button
+              onClick={handleNewsSync}
+              disabled={newsSyncing}
+              className="px-3 py-1.5 bg-slate-700 text-white rounded-lg text-xs font-medium hover:bg-slate-600 disabled:opacity-50 transition-colors"
+            >
+              {newsSyncing ? '同步中…' : '抓取新闻'}
+            </button>
+          </div>
+        </div>
+
+        {newsSyncMsg && (
+          <div className="text-xs text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded px-3 py-2">
+            {newsSyncMsg}
+          </div>
+        )}
+
+        {/* 新闻列表 */}
+        <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm divide-y divide-slate-100 dark:divide-slate-800">
+          {newsLoading && (
+            <div className="flex items-center justify-center h-32 text-slate-400 text-sm gap-2">
+              <span className="material-symbols-outlined animate-spin text-lg">progress_activity</span>
+              加载中…
+            </div>
+          )}
+
+          {!newsLoading && newsItems.length === 0 && (
+            <div className="flex flex-col items-center justify-center h-32 text-slate-400 text-sm gap-2">
+              <span className="material-symbols-outlined text-3xl">newspaper</span>
+              <span>暂无新闻，请点击「抓取新闻」</span>
+            </div>
+          )}
+
+          {!newsLoading && newsItems.map(item => (
+            <div key={item.id} className="px-4 py-3 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
+              <div className="flex items-start justify-between gap-3">
+                <a
+                  href={item.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-sm font-medium text-slate-800 dark:text-slate-100 hover:text-primary leading-snug flex-1"
+                >
+                  {item.title}
+                </a>
+                <span className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                  item.category === 'conflict'
+                    ? 'bg-rose-100 text-rose-600 dark:bg-rose-900/30 dark:text-rose-400'
+                    : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'
+                }`}>
+                  {item.category === 'conflict' ? '冲突' : '原油'}
+                </span>
+              </div>
+              <div className="flex items-center gap-3 mt-1.5 text-xs text-slate-400">
+                <span>{item.source_name}</span>
+                {item.published_at && (
+                  <span>{item.published_at.slice(0, 16).replace('T', ' ')}</span>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
 
     </div>

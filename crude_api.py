@@ -24,8 +24,11 @@ from fastapi.responses import JSONResponse
 
 from get_crude_data import (
     CRUDE_SYMBOLS,
+    CROSS_SYMBOLS,
+    CROSS_DIFF_THRESHOLD,
     connect_and_fetch_crude,
     init_crude_db,
+    init_cross_db,
 )
 
 logger = logging.getLogger(__name__)
@@ -77,6 +80,7 @@ def _ensure_table():
     conn = sqlite3.connect(DB_PATH)
     try:
         init_crude_db(conn)
+        init_cross_db(conn)
     finally:
         conn.close()
 
@@ -232,6 +236,64 @@ def get_crude_symbol_daily(
             "currency":    cfg["currency"],
             "items":       items,
             "count":       len(items),
+        }
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# GET /api/crude/cross  — 价格交叉验证结果
+# ---------------------------------------------------------------------------
+
+@crude_router.get("/cross", summary="价格交叉验证结果（akshare vs yfinance）")
+def get_crude_cross(
+    ts_code: Optional[str] = Query(None, description="WTI 或 BRENT，不传则全部"),
+    limit:   int           = Query(60, ge=1, le=365),
+):
+    """
+    返回最近 N 天的 WTI/BRENT 交叉验证数据。
+
+    响应格式：
+    {
+      "threshold_pct": 3.0,
+      "items": [
+        {
+          "ts_code": "WTI",
+          "trade_date": "20250320",
+          "close_primary": 68.5,   // akshare
+          "close_alt": 68.3,       // yfinance
+          "diff_pct": 0.29,
+          "is_verified": 1
+        },
+        ...
+      ]
+    }
+    """
+    _ensure_table()
+    conn = _get_db()
+    try:
+        conditions: list = []
+        params: list = []
+        if ts_code and ts_code.upper() in CROSS_SYMBOLS:
+            conditions.append("ts_code = ?")
+            params.append(ts_code.upper())
+
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        rows = conn.execute(
+            f"""
+            SELECT ts_code, trade_date, close_primary, close_alt,
+                   diff_pct, is_verified, verified_at
+            FROM crude_price_cross {where}
+            ORDER BY trade_date DESC, ts_code
+            LIMIT ?
+            """,
+            params + [limit],
+        ).fetchall()
+
+        return {
+            "threshold_pct": CROSS_DIFF_THRESHOLD,
+            "symbols":       list(CROSS_SYMBOLS.keys()),
+            "items":         [dict(r) for r in rows],
         }
     finally:
         conn.close()

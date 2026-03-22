@@ -1,6 +1,6 @@
 # 基金净值数据采集与可视化系统
 
-自动从 163 邮箱中拉取 Excel 附件，智能提取基金净值数据并存入 SQLite 数据库，支持数据质量检测、Excel 导出，以及通过 **FastAPI 后端 API** 进行数据查询与手动编辑。同时支持通过 **akshare**（免费，无需 Token）接入 A 股主要指数、中金所金融期货、全球原油价格日线行情及股指期货基差分析。前端为 React 单页应用，支持移动端（≥375px），提供基金列表、净值走势图、多基金对比、定时自动同步、手动补充净值、A 股行情看板、股指基差分析和原油价格对比等功能。
+自动从 163 邮箱中拉取 Excel 附件，智能提取基金净值数据并存入 SQLite 数据库，支持数据质量检测、Excel 导出，以及通过 **FastAPI 后端 API** 进行数据查询与手动编辑。同时支持通过 **akshare**（免费，无需 Token）接入 A 股主要指数、中金所金融期货、全球原油价格日线行情及股指期货基差分析。此外内置 **中东冲突与原油新闻** RSS 聚合功能，每 2 小时自动抓取 USNI News / OilPrice.com / Al Jazeera 三个来源，并通过 **yfinance 交叉验证** WTI/Brent 价格数据可靠性。前端为 React 单页应用，支持移动端（≥375px）。
 
 ---
 
@@ -11,8 +11,10 @@ emailcontent/
 ├── get_163_email.py        # 主程序：连接邮箱、提取附件、写入数据库
 ├── smart_extractor.py      # 核心库：智能识别 Excel 格式并提取数据
 ├── get_market_data.py      # 行情拉取：akshare 指数 + 金融期货日线/5分钟K线
-├── get_crude_data.py       # 原油数据拉取：WTI/Brent/SC 日频（akshare，免费）
+├── get_crude_data.py       # 原油数据拉取：WTI/Brent/SC 日频 + yfinance 交叉验证
 ├── crude_api.py            # 原油 API 路由（FastAPI APIRouter，挂载到 api.py）
+├── get_news_data.py        # 新闻 RSS 抓取：USNI News / OilPrice.com / Al Jazeera
+├── news_api.py             # 新闻 API 路由（FastAPI APIRouter，挂载到 api.py）
 ├── data_quality_check.py   # 质检脚本：异常检测 + 生成对外展示库
 ├── organize_fund_data.py   # 工具脚本：将数据库导出为 Excel 文件
 ├── api.py                  # FastAPI 后端：REST API + APScheduler 定时同步
@@ -30,9 +32,9 @@ emailcontent/
 │   │   │   ├── MarketDashboard.jsx # A股行情页（指数卡片 + 期货表）
 │   │   │   ├── FundComparison.jsx  # 多基金对比页（归一图表 + 绩效指标）
 │   │   │   ├── BasisAnalysis.jsx   # 股指基差分析页（年化基差走势）
-│   │   │   └── CrudeOilComparison.jsx # 原油价格对比页（WTI/Brent/SC）
+│   │   │   └── CrudeOilComparison.jsx # 原油价格对比 + 中东冲突新闻列表
 │   │   ├── api/
-│   │   │   └── crudeApi.js         # 原油 API 封装
+│   │   │   └── crudeApi.js         # 原油 + 新闻 API 封装
 │   │   ├── utils/
 │   │   │   └── metrics.js          # 绩效指标计算（夏普/最大回撤等）
 │   │   └── api.js                  # 通用 API 调用封装
@@ -52,16 +54,25 @@ emailcontent/
        ▼                                       ▼
 get_163_email.py                  get_market_data.py  get_crude_data.py
        │   增量拉取（基于 IMAP UID）   指数+期货日线/5min  WTI/Brent/SC 日线
-       │   12:00/18:00 自动执行       11:30/15:15 自动执行  按需手动同步
-       │   POST /api/sync/trigger    POST /api/market/sync/trigger
+       │   12:00/18:00 自动执行       11:30/15:15 自动执行  15:20 自动同步
+       │   POST /api/sync/trigger    POST /api/market/sync/trigger  + yfinance 交叉验证
        │                             POST /api/crude/sync/trigger
+       │
+       │                         RSS 新闻源（免费，无需 Token）
+       │                         USNI News / OilPrice.com / Al Jazeera
+       │                                       │
+       │                               get_news_data.py
+       │                               每 2 小时自动抓取
+       │                               POST /api/news/sync/trigger
+       │                                       │
        ▼                                       ▼
 fund_data.db  ◄──────────────────────────────
   (funds, fund_nav_data, email_sources,
    extraction_failures, sync_state,
    index_daily, futures_daily,
    index_5min, futures_5min,
-   crude_daily)
+   crude_daily, crude_price_cross,
+   crude_news)
        │
        ├──────────────────────────────────┐
        ▼                                  ▼
@@ -77,7 +88,7 @@ fund_clean.db                    REST API（端口 8000）
                                    /market A股行情看板
                                    /compare 多基金对比
                                    /basis 股指基差分析
-                                   /crude 原油价格对比
+                                   /crude 原油价格对比 + 中东冲突新闻
 ```
 
 ---
@@ -141,15 +152,21 @@ python get_market_data.py
 python get_crude_data.py
 ```
 
-拉取 WTI（NYMEX）、Brent（ICE）、上海 SC（INE）三品种日频收盘价，增量写入 `crude_daily` 表。
+拉取 WTI（NYMEX）、Brent（ICE）、上海 SC（INE）三品种日频收盘价，增量写入 `crude_daily` 表。同时自动执行 **yfinance 交叉验证**（WTI/Brent 与 Yahoo Finance 对比，差异 > 3% 标记为未验证），结果写入 `crude_price_cross` 表。
+
+### 6. 抓取中东冲突与原油新闻（可选）
+
+```bash
+python get_news_data.py
+```
+
+从 USNI News、OilPrice.com、Al Jazeera 三个 RSS 源抓取新闻，写入 `crude_news` 表。服务启动后每 2 小时自动执行，也可在前端原油页面点击「抓取新闻」手动触发。
 
 ### 6. 数据质量检测
 
 ```bash
 python data_quality_check.py
 ```
-
-输出检测报告并生成 `fund_clean.db`。
 
 ### 7. 启动后端 API
 
@@ -164,6 +181,8 @@ python api.py
 > 启动时会同时启动 APScheduler：
 > - 邮件同步：每天 12:00 和 18:00（北京时间）自动执行
 > - 行情同步：每天 11:30 和 15:15（北京时间）自动执行
+> - 原油同步：每天 15:20（北京时间）自动执行
+> - 新闻抓取：每 2 小时自动执行（USNI / OilPrice / Al Jazeera）
 
 ### 8. 启动前端
 
@@ -235,6 +254,7 @@ python organize_fund_data.py
 - **最新价格卡片**：三品种最新收盘价与日期
 - **最近30日数据表**：三品种并排
 - **同步状态与手动同步**：显示同步时间、状态徽章，支持手动触发
+- **中东冲突与原油新闻**：页面底部展示 RSS 聚合新闻列表，支持按「冲突动态 / 原油市场」分类筛选；每条显示标题（外链）、来源、发布时间；「抓取新闻」按钮手动触发同步
 
 ### 移动端适配
 
@@ -366,8 +386,17 @@ python organize_fund_data.py
 |--------|------|-------------|
 | GET | `/api/crude/daily` | WTI/BRENT/SC 三品种联合对比数据 |
 | GET | `/api/crude/{ts_code}/daily` | 单品种历史数据（`ts_code`: WTI/BRENT/SC，不区分大小写） |
+| GET | `/api/crude/cross` | WTI/BRENT 价格交叉验证结果（akshare vs yfinance） |
 | GET | `/api/crude/sync/status` | 原油同步状态 |
 | POST | `/api/crude/sync/trigger` | 触发原油数据同步 |
+
+### 新闻接口
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/news` | 新闻列表（支持 `category=conflict\|crude`、`limit`、`offset`） |
+| GET | `/api/news/sync/status` | 新闻同步状态 |
+| POST | `/api/news/sync/trigger` | 手动触发新闻 RSS 抓取 |
 
 **`GET /api/crude/daily` 响应示例**
 
@@ -422,6 +451,18 @@ python organize_fund_data.py
 
 每个品种独立同步，单品种失败不影响其他。状态记录于 `sync_state`（`crude_last_*` 键）。
 
+同步完成后自动执行 **yfinance 交叉验证**：拉取 Yahoo Finance 的 WTI（`CL=F`）和 Brent（`BZ=F`）近 90 天数据，与 akshare 数据逐日对比，差异超过 3% 则标记 `is_verified=0`，结果写入 `crude_price_cross` 表。yfinance 未安装时自动跳过，不影响主数据入库。
+
+### `get_news_data.py` — 新闻 RSS 抓取
+
+| 来源 | URL | 策略 |
+|------|-----|------|
+| USNI News | `news.usni.org/feed` | 全量收录（美国海军/霍尔木兹） |
+| OilPrice.com | `oilprice.com/rss/main` | 全量收录（原油专属媒体） |
+| Al Jazeera | `aljazeera.com/xml/rss/all.xml` | 关键词过滤（Iran/Israel/Hormuz/crude/Houthi 等） |
+
+通过 `feedparser` 解析 RSS，新条目按 `url UNIQUE` 去重写入 `crude_news` 表。支持 `conflict` / `crude` 两种分类标签。
+
 ### `crude_api.py` — 原油 API 路由
 
 `APIRouter(prefix="/api/crude")`，在 `api.py` 中通过 `app.include_router()` 挂载。import 失败（akshare 未安装）时 API 正常启动，原油端点不可用。
@@ -453,12 +494,17 @@ python organize_fund_data.py
 | `market_futures_last_date` | 期货最近成功同步日期（YYYYMMDD） |
 | `market_last_status/error` | 行情同步状态 |
 | `crude_last_status/time/error/added` | 原油同步状态 |
+| `news_last_status/time/error/added` | 新闻 RSS 同步状态 |
 
 **`index_daily`** — A 股指数日线：`ts_code`, `trade_date`, OHLCV, `pct_chg`, UNIQUE(`ts_code`, `trade_date`)
 
 **`futures_daily`** — 金融期货日线：`ts_code`, `symbol`, `trade_date`, OHLCV, `oi`, UNIQUE(`ts_code`, `trade_date`)
 
 **`crude_daily`** — 原油日线：`ts_code`（WTI/BRENT/SC）, `trade_date`, OHLCV, `currency`, UNIQUE(`ts_code`, `trade_date`)
+
+**`crude_price_cross`** — 原油价格交叉验证：`ts_code`, `trade_date`, `close_primary`（akshare）, `close_alt`（yfinance）, `diff_pct`, `is_verified`（差异<3%为1）, `verified_at`, UNIQUE(`ts_code`, `trade_date`)
+
+**`crude_news`** — 原油/中东冲突新闻：`id`, `title`, `url (UNIQUE)`, `source_name`, `published_at`, `summary`, `category`（conflict/crude）, `fetched_at`
 
 ---
 
@@ -484,6 +530,8 @@ apscheduler>=3.10.0  # 定时任务调度
 akshare>=1.10.0      # A股/期货/原油行情（免费，无需 Token）
 pytz>=2023.3         # 时区处理
 curl_cffi>=0.7.0     # akshare 部分接口依赖
+feedparser>=6.0.0    # RSS 解析（新闻抓取）
+yfinance>=0.2.50     # Yahoo Finance 数据（WTI/Brent 交叉验证）
 ```
 
 ### Node.js（`web/package.json`）

@@ -86,3 +86,40 @@ export function daysAgoYYYYMMDD(n) {
   d.setDate(d.getDate() - n)
   return d.toISOString().slice(0, 10).replace(/-/g, '')
 }
+
+// ---------------------------------------------------------------------------
+// 新闻 API
+// ---------------------------------------------------------------------------
+
+/**
+ * 获取新闻列表
+ * @param {Object} opts - { category: 'conflict'|'crude', limit, offset }
+ * @param {AbortSignal} signal
+ */
+export async function fetchCrudeNews(opts = {}, signal) {
+  const params = new URLSearchParams()
+  if (opts.category) params.set('category', opts.category)
+  if (opts.limit  != null) params.set('limit',  opts.limit)
+  if (opts.offset != null) params.set('offset', opts.offset)
+  const qs = params.toString()
+  return apiFetch(`/api/news${qs ? '?' + qs : ''}`, signal)
+}
+
+/**
+ * 获取新闻同步状态
+ */
+export async function fetchNewsSyncStatus(signal) {
+  return apiFetch('/api/news/sync/status', signal)
+}
+
+/**
+ * 手动触发新闻同步
+ */
+export async function triggerNewsSync() {
+  const res = await fetch('/api/news/sync/trigger', { method: 'POST' })
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}))
+    throw new Error(body.detail || `HTTP ${res.status}`)
+  }
+  return res.json()
+}

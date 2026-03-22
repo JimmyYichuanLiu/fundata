@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Fund NAV (Net Asset Value) data collection and visualization system. Pulls fund data from 163 email attachments (Excel files), stores it in SQLite, serves it via a FastAPI REST API, and displays it in a React frontend. Also supports A-share index and financial futures daily/intraday data via akshare (free, no API key required).
+Fund NAV (Net Asset Value) data collection and visualization system. Pulls fund data from 163 email attachments (Excel files), stores it in SQLite, serves it via a FastAPI REST API, and displays it in a React frontend. Also supports A-share index and financial futures daily/intraday data via akshare (free, no API key required). Includes a Middle East conflict & crude oil news aggregator (RSS from USNI News / OilPrice.com / Al Jazeera, auto-fetched every 2 hours) and cross-validation of WTI/Brent prices against Yahoo Finance (yfinance).
 
 ## Commands
 
@@ -19,6 +19,12 @@ python get_163_email.py
 
 # Sync A-share market data (indices + futures, no token required)
 python get_market_data.py
+
+# Sync crude oil prices (WTI/Brent/SC via akshare + yfinance cross-validation)
+python get_crude_data.py
+
+# Fetch Middle East / crude oil news from RSS feeds
+python get_news_data.py
 
 # Run data quality check and generate fund_clean.db
 python data_quality_check.py
@@ -77,7 +83,9 @@ The system has four layers:
 
 **API Layer** (`api.py`): FastAPI app with 30+ endpoints serving from `fund_data.db`. By default, queries apply a quality filter (`apply_filter=true`) that excludes records with NAV > 5. Manual NAV entry is supported (these records have `source_id = NULL`). Paginates at 1000 rows default, 5000 max. An `APScheduler BackgroundScheduler` runs inside the `lifespan` context, triggering email sync at 12:00 & 18:00 and market sync at 11:30 & 15:15 (Asia/Shanghai). Both sync jobs use `threading.Lock` to prevent concurrent runs. Sync state is stored as key-value rows in the `sync_state` table.
 
-**Data Ingestion — Crude Oil** (`get_crude_data.py` + `crude_api.py`): Fetches WTI (NYMEX via akshare `futures_foreign_hist("CL")`), Brent (ICE via akshare `futures_foreign_hist("OIL")`), and Shanghai SC (INE via akshare `futures_zh_daily_sina("SC0")`) daily prices. Stores in `crude_daily` table in `fund_data.db`. `crude_api.py` is a standalone FastAPI `APIRouter` (prefix `/api/crude`) mounted in `api.py` via `app.include_router()`.
+**Data Ingestion — Crude Oil** (`get_crude_data.py` + `crude_api.py`): Fetches WTI (NYMEX via akshare `futures_foreign_hist("CL")`), Brent (ICE via akshare `futures_foreign_hist("OIL")`), and Shanghai SC (INE via akshare `futures_zh_daily_sina("SC0")`) daily prices. Stores in `crude_daily` table in `fund_data.db`. After each sync, cross-validates WTI and Brent against Yahoo Finance (yfinance tickers `CL=F` / `BZ=F`) for the last 90 days; differences > 3% are flagged `is_verified=0` in `crude_price_cross` table. yfinance import wrapped in try/except — cross-validation skips silently if not installed. `crude_api.py` is a standalone FastAPI `APIRouter` (prefix `/api/crude`) mounted in `api.py` via `app.include_router()`.
+
+**Data Ingestion — News** (`get_news_data.py` + `news_api.py`): Fetches RSS feeds from USNI News (full, naval/Hormuz), OilPrice.com (full, crude oil market), and Al Jazeera (keyword-filtered: Iran/Israel/Hormuz/crude/Houthi/IRGC etc.). Uses `feedparser`; deduplicates by `url UNIQUE`. Stores in `crude_news` table with `category` = `conflict` or `crude`. `news_api.py` is an independent `APIRouter` (prefix `/api/news`) mounted in `api.py`. APScheduler triggers news sync every 2 hours.
 
 **Frontend** (`web/src/`): Six-page React app with a shared `Layout` component:
 - `FundList.jsx`: Dashboard with search, "立即同步" button, per-row data-issue badge, extraction failures badge (orange, shows count, opens modal with failure details), and nav link to Market page.
@@ -85,7 +93,7 @@ The system has four layers:
 - `MarketDashboard.jsx`: Index overview cards (9 A-share indices, click to see history chart), financial futures table (latest active contract per symbol), and market sync trigger.
 - `FundComparison.jsx` (`/compare`): Multi-fund comparison (up to 10 funds), searchable selector, normalized-to-100 or absolute NAV chart, performance metrics table (period return, annualized return, annualized volatility, max drawdown, Sharpe ratio, monthly win rate). Uses `computeMetrics()` from `web/src/utils/metrics.js`.
 - `BasisAnalysis.jsx` (`/basis`): Stock-index futures basis analysis for IF/IC/IH/IM. Shows today's contract snapshot table (当季/下季/隔季, basis, annualized basis%) and historical annualized basis% chart. Calls `/api/market/basis/quarterly` and `/api/market/basis/today`.
-- `CrudeOilComparison.jsx` (`/crude`): Crude oil price comparison page — WTI/Brent (USD, left Y-axis) vs Shanghai SC (CNY, right Y-axis) dual-axis chart, latest-price summary cards, sync controls. API calls in `web/src/api/crudeApi.js`.
+- `CrudeOilComparison.jsx` (`/crude`): Crude oil price comparison page — WTI/Brent (USD, left Y-axis) vs Shanghai SC (CNY, right Y-axis) dual-axis chart, latest-price summary cards, sync controls. Bottom section shows Middle East conflict & crude oil news list with category filter (conflict/crude), source, date, and external link. "抓取新闻" button triggers POST /api/news/sync/trigger. API calls in `web/src/api/crudeApi.js`.
 - `RangeScrubber.jsx`: Dual-handle date range scrubber used on chart pages. Handles are `w-4 h-4 md:w-3.5 md:h-3.5` (slightly larger on mobile for touch). Date labels use `text-[11px]`.
 
 The API base URL is proxied via Vite to `http://127.0.0.1:8000`.
@@ -94,7 +102,7 @@ The API base URL is proxied via Vite to `http://127.0.0.1:8000`.
 
 Two SQLite databases:
 
-- **`fund_data.db`** — raw data with full lineage. Key tables: `funds` (master, keyed on `产品代码`), `fund_nav_data` (NAV records, UNIQUE on `(产品代码, 净值日期)`), `email_sources` (audit trail), `extraction_failures` (failed attachment parses), `sync_state` (IMAP UID checkpoint + scheduler sync status), `index_daily` (A-share index OHLCV), `futures_daily` (financial futures OHLCV+OI), `index_5min` (index 5-min bars), `futures_5min` (futures 5-min bars), `crude_daily` (WTI/Brent/SC OHLCV).
+- **`fund_data.db`** — raw data with full lineage. Key tables: `funds` (master, keyed on `产品代码`), `fund_nav_data` (NAV records, UNIQUE on `(产品代码, 净值日期)`), `email_sources` (audit trail), `extraction_failures` (failed attachment parses), `sync_state` (IMAP UID checkpoint + scheduler sync status), `index_daily` (A-share index OHLCV), `futures_daily` (financial futures OHLCV+OI), `index_5min` (index 5-min bars), `futures_5min` (futures 5-min bars), `crude_daily` (WTI/Brent/SC OHLCV), `crude_price_cross` (WTI/Brent cross-validation vs yfinance), `crude_news` (RSS news articles).
 - **`fund_clean.db`** — generated by `data_quality_check.py`. Filters out NAV > 5, deduplicates, and denormalizes email source fields inline.
 
 Dates are stored as `YYYYMMDD` strings in the DB; the fund API accepts/returns `YYYY-MM-DD`. Market endpoints accept/return `YYYYMMDD` directly.
@@ -117,6 +125,10 @@ Dates are stored as `YYYYMMDD` strings in the DB; the fund API accepts/returns `
 | `crude_last_time` | ISO timestamp of most recent crude sync attempt |
 | `crude_last_error` | Error message on crude sync failure |
 | `crude_last_added` | Count of rows added in last crude sync |
+| `news_last_status` | `running` / `success` / `error` (news RSS sync) |
+| `news_last_time` | ISO timestamp of most recent news sync attempt |
+| `news_last_error` | Error message on news sync failure |
+| `news_last_added` | Count of articles added in last news sync |
 
 ## Configuration
 
@@ -173,8 +185,16 @@ MARKET_INTRADAY_MODE=0
 |--------|------|-------------|
 | GET | `/api/crude/daily` | Three-symbol combined data (WTI/BRENT/SC) for comparison chart |
 | GET | `/api/crude/{ts_code}/daily` | Single symbol history (ts_code: WTI/BRENT/SC) |
+| GET | `/api/crude/cross` | Price cross-validation results (akshare vs yfinance, last 60 rows) |
 | GET | `/api/crude/sync/status` | Crude sync status |
 | POST | `/api/crude/sync/trigger` | Trigger crude data sync |
+
+### News endpoints
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/news` | News list (query: `category=conflict\|crude`, `limit`, `offset`) |
+| GET | `/api/news/sync/status` | News RSS sync status |
+| POST | `/api/news/sync/trigger` | Trigger news RSS fetch |
 
 ### Market endpoints
 | Method | Path | Description |
@@ -189,7 +209,7 @@ MARKET_INTRADAY_MODE=0
 ## Key Design Decisions
 
 - **Incremental sync**: IMAP UID + UIDVALIDITY stored in `sync_state` table; falls back to full scan if mailbox is rebuilt.
-- **Scheduled sync**: `APScheduler BackgroundScheduler` integrated into `lifespan`; email sync at 12:00 & 18:00, market sync at 11:30 & 15:15 Asia/Shanghai. Each uses a separate `threading.Lock` to prevent concurrent runs. Manual triggers via POST endpoints.
+- **Scheduled sync**: `APScheduler BackgroundScheduler` integrated into `lifespan`; email sync at 12:00 & 18:00, market sync at 11:30 & 15:15, crude sync at 15:20, news RSS sync every 2 hours (Asia/Shanghai). Each uses a separate `threading.Lock` to prevent concurrent runs. Manual triggers via POST endpoints.
 - **Smart extraction**: `smart_extractor.py` handles 4+ Excel layouts with Chinese field name aliases for normalization.
 - **Extraction failures**: Failed attachment parses are recorded in `extraction_failures` table. Frontend shows orange badge with count and modal detail view.
 - **Dual DB pattern**: Raw DB preserves all data; clean DB is regenerated on demand from quality checks.
@@ -202,7 +222,9 @@ MARKET_INTRADAY_MODE=0
 - **Market data — index source**: Direct Tencent QQ Finance kline API (`proxy.finance.qq.com`) with date-range query. Returns OHLCV + pct_chg + amount. Max 2000 rows per call (~8 years). 中证2000 not available, silently skipped.
 - **Market data — conditional import**: `api.py` wraps `from get_market_data import ...` in a try/except so the API starts normally even if akshare is not installed. Market endpoints return empty responses in that case.
 - **5-min intraday mode**: Controlled by `MARKET_INTRADAY_MODE=1` env var. Adds 5-minute APScheduler interval job; `is_trading_hours()` guard skips execution outside 9:25–11:35 and 12:55–15:05. Index 5-min uses `ak.stock_zh_a_minute` (Sina), futures 5-min uses `ak.futures_zh_minute_sina`.
-- **Crude oil data**: `get_crude_data.py` + `crude_api.py` are an independent module. `crude_api.py` is an `APIRouter` mounted on `/api/crude`. Data stored in `crude_daily` table (UNIQUE on `ts_code, trade_date`). SC uses `futures_zh_daily_sina("SC0")`; WTI/Brent use `futures_foreign_hist("CL"/"OIL")`. Sync state keys: `crude_last_status`, `crude_last_time`, `crude_last_error`, `crude_last_added`. Import wrapped in try/except so API starts even if akshare is missing.
+- **Crude oil data**: `get_crude_data.py` + `crude_api.py` are an independent module. `crude_api.py` is an `APIRouter` mounted on `/api/crude`. Data stored in `crude_daily` table (UNIQUE on `ts_code, trade_date`). SC uses `futures_zh_daily_sina("SC0")`; WTI/Brent use `futures_foreign_hist("CL"/"OIL")`. After each sync, cross-validates WTI/Brent against yfinance (`CL=F`/`BZ=F`, 90-day lookback); results in `crude_price_cross` table (`is_verified=0` when diff > 3%). Cross-validation skips silently if yfinance not installed. Sync state keys: `crude_last_status`, `crude_last_time`, `crude_last_error`, `crude_last_added`. Import wrapped in try/except so API starts even if akshare is missing.
+- **News aggregation**: `get_news_data.py` + `news_api.py` are an independent module. `news_api.py` is an `APIRouter` mounted on `/api/news`. `feedparser` fetches from USNI News (full), OilPrice.com (full), Al Jazeera (keyword-filtered). Articles stored in `crude_news` table (UNIQUE on `url`). Category field: `conflict` or `crude`. APScheduler fires every 2 hours. Sync state keys: `news_last_status`, `news_last_time`, `news_last_error`, `news_last_added`. Import wrapped in try/except so API starts if feedparser is missing.
+- **Price cross-validation**: `_sync_cross_validate()` in `get_crude_data.py`. Compares akshare `close` vs yfinance `Close` (adj) for WTI/BRENT. Tolerance `CROSS_DIFF_THRESHOLD = 3.0%`. Results in `crude_price_cross` (`close_primary` = akshare, `close_alt` = yfinance). Exposed via `GET /api/crude/cross`.
 - **Fund comparison**: `/compare` route. Uses `/api/compare` endpoint (max 20 fund_ids). Frontend normalizes series to 100 at start date. Performance metrics computed by `web/src/utils/metrics.js` (period return, annualized return, volatility, max drawdown, Sharpe at 2.5% risk-free, monthly win rate).
 - **Basis analysis**: `/basis` route. Calculates stock-index futures basis (spot − futures) and annualizes it (basis / futures / remaining_days × 365 × 100). Covers IF/IC/IH/IM; 当季 and 下季 contracts. Expiry = third Friday of delivery month. Data from `index_daily` joined with `futures_daily`.
 - **Mobile responsiveness**: `Layout.jsx` renders a `lg:hidden sticky top-0 z-40 h-14` topbar on mobile (≥375px) instead of the old `fixed` floating hamburger. All page-level sticky headers use `sticky top-14 lg:top-0` so they stick below the 56px topbar on mobile and at y=0 on desktop. Index cards grid is `grid-cols-2 sm:grid-cols-3 lg:grid-cols-5`. Table cells use `px-3 py-3 md:px-6 md:py-4` (reduced on mobile). Content padding is `p-4 md:p-8`. Symbol tabs in BasisAnalysis use `flex-wrap` so they don't overflow at 375px.

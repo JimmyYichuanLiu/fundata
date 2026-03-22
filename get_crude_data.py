@@ -53,6 +53,15 @@ CRUDE_SYMBOLS = {
     },
 }
 
+# Yahoo Finance 代码映射（仅 WTI / BRENT，SC 不在 Yahoo Finance）
+CROSS_SYMBOLS = {
+    "WTI":   "CL=F",   # NYMEX WTI 近月合约
+    "BRENT": "BZ=F",   # ICE Brent 近月合约
+}
+
+# 交叉验证容忍度：差异超过此百分比则标记为未验证
+CROSS_DIFF_THRESHOLD = 3.0
+
 # ---------------------------------------------------------------------------
 # 数据库初始化
 # ---------------------------------------------------------------------------
@@ -79,6 +88,29 @@ def init_crude_db(conn: sqlite3.Connection):
     """)
     conn.commit()
     logger.info("crude_daily 表初始化完毕")
+
+
+def init_cross_db(conn: sqlite3.Connection):
+    """创建 crude_price_cross 交叉验证表（若不存在）。"""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS crude_price_cross (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_code        TEXT    NOT NULL,
+            trade_date     TEXT    NOT NULL,
+            close_primary  REAL,
+            close_alt      REAL,
+            diff_pct       REAL,
+            is_verified    INTEGER DEFAULT 1,
+            verified_at    TEXT,
+            UNIQUE(ts_code, trade_date)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_crude_cross_code_date
+        ON crude_price_cross(ts_code, trade_date)
+    """)
+    conn.commit()
+    logger.info("crude_price_cross 表初始化完毕")
 
 
 # ---------------------------------------------------------------------------
@@ -270,17 +302,110 @@ def _sync_sc(conn: sqlite3.Connection) -> int:
 
 
 # ---------------------------------------------------------------------------
+# 交叉验证：yfinance vs akshare
+# ---------------------------------------------------------------------------
+
+def _sync_cross_validate(conn: sqlite3.Connection, lookback_days: int = 90) -> int:
+    """
+    用 yfinance 数据（Yahoo Finance）与 crude_daily 中的 akshare 数据做交叉验证。
+    只验证 WTI 和 BRENT（SC 不在 Yahoo Finance）。
+    验证结果写入 crude_price_cross 表。
+    返回更新/新增的行数。
+    """
+    try:
+        import yfinance as yf
+        import pandas as pd
+    except ImportError:
+        logger.warning("yfinance 未安装，跳过交叉验证。请执行: pip install yfinance")
+        return 0
+
+    from datetime import date, timedelta
+    today = date.today()
+    start_str = (today - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+    end_str   = today.strftime("%Y-%m-%d")
+
+    init_cross_db(conn)
+    verified_at = datetime.now().isoformat()
+    total_updated = 0
+
+    for ts_code, yf_ticker in CROSS_SYMBOLS.items():
+        logger.info("[cross] %s — yfinance(%s) %s ~ %s", ts_code, yf_ticker, start_str, end_str)
+        try:
+            df = yf.download(
+                yf_ticker, start=start_str, end=end_str,
+                progress=False, auto_adjust=True,
+            )
+        except Exception as e:
+            logger.error("[cross] %s yfinance 拉取失败: %s", ts_code, e)
+            continue
+
+        if df is None or df.empty:
+            logger.warning("[cross] %s yfinance 返回空", ts_code)
+            continue
+
+        # 兼容新旧版 yfinance 的列结构（MultiIndex vs flat）
+        if isinstance(df.columns, pd.MultiIndex):
+            close_series = df[("Close", yf_ticker)]
+        else:
+            close_series = df["Close"]
+
+        symbol_updated = 0
+        for date_idx, close_val in close_series.items():
+            if pd.isna(close_val):
+                continue
+            trade_date = date_idx.strftime("%Y%m%d")
+            close_alt = float(close_val)
+
+            # 从 crude_daily 取 akshare 收盘价
+            row = conn.execute(
+                "SELECT close FROM crude_daily WHERE ts_code=? AND trade_date=?",
+                (ts_code, trade_date),
+            ).fetchone()
+            close_primary = float(row[0]) if row else None
+
+            diff_pct   = None
+            is_verified = 1
+            if close_primary and close_primary != 0:
+                diff_pct    = abs(close_alt - close_primary) / close_primary * 100
+                is_verified = 1 if diff_pct < CROSS_DIFF_THRESHOLD else 0
+                if not is_verified:
+                    logger.warning(
+                        "[cross] %s %s 差异 %.2f%% (akshare=%.2f, yfinance=%.2f)",
+                        ts_code, trade_date, diff_pct, close_primary, close_alt,
+                    )
+
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO crude_price_cross
+                    (ts_code, trade_date, close_primary, close_alt,
+                     diff_pct, is_verified, verified_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (ts_code, trade_date, close_primary, close_alt,
+                 diff_pct, is_verified, verified_at),
+            )
+            symbol_updated += 1
+
+        conn.commit()
+        logger.info("[cross] %s 更新 %d 行", ts_code, symbol_updated)
+        total_updated += symbol_updated
+
+    return total_updated
+
+
+# ---------------------------------------------------------------------------
 # 主入口：供 api.py 调度器调用 & 直接运行
 # ---------------------------------------------------------------------------
 
 def connect_and_fetch_crude(db_path: str = DB_PATH):
     """
-    完整同步一次所有三个原油品种。
+    完整同步一次所有三个原油品种，并执行 yfinance 交叉验证。
     设计原则：单品种失败不影响其他品种；sync_state 记录状态供 API 查询。
     """
     conn = sqlite3.connect(db_path, check_same_thread=False)
     try:
         init_crude_db(conn)
+        init_cross_db(conn)
 
         now_str = datetime.now().isoformat()
         _set_sync_key(conn, "crude_last_status", "running")
@@ -301,6 +426,13 @@ def connect_and_fetch_crude(db_path: str = DB_PATH):
                 msg = f"[{ts_code}] 同步失败: {e}"
                 logger.error(msg, exc_info=True)
                 errors.append(msg)
+
+        # 交叉验证（yfinance vs akshare，失败不影响主数据）
+        try:
+            cross_updated = _sync_cross_validate(conn)
+            logger.info("交叉验证完毕，更新 %d 行", cross_updated)
+        except Exception as e:
+            logger.error("交叉验证失败（不影响主数据入库）: %s", e)
 
         if errors:
             _set_sync_key(conn, "crude_last_status", "partial_error")

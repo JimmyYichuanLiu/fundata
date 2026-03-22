@@ -71,6 +71,15 @@ except ImportError:
     _run_crude_sync = None
     _CRUDE_ENABLED = False
 
+# 新闻模块（独立，失败不影响主 API）
+try:
+    from news_api import news_router as _news_router, _run_news_sync as _run_news_sync_bg
+    _NEWS_ENABLED = True
+except ImportError:
+    _news_router = None
+    _run_news_sync_bg = None
+    _NEWS_ENABLED = False
+
 try:
     from get_market_data import (
         connect_and_fetch_market as _connect_and_fetch_market,
@@ -187,6 +196,9 @@ async def lifespan(app: FastAPI):
     if _CRUDE_ENABLED:
         # 原油数据：收盘后 15:20 更新
         _scheduler.add_job(_run_crude_sync, "cron", hour=15, minute=20)
+    if _NEWS_ENABLED:
+        # 新闻同步：每 2 小时抓取一次 RSS
+        _scheduler.add_job(_run_news_sync_bg, "interval", hours=2)
     _scheduler.start()
     logger.info("Scheduler started")
     yield
@@ -211,6 +223,10 @@ app.add_middleware(
 # 挂载原油路由（独立模块）
 if _CRUDE_ENABLED:
     app.include_router(_crude_router)
+
+# 挂载新闻路由（独立模块）
+if _NEWS_ENABLED:
+    app.include_router(_news_router)
 
 # =============================================================================
 # Section 4: Pydantic Models
