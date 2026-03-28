@@ -55,7 +55,7 @@ export default function CrudeDataTable() {
           className="flex items-center gap-1 text-sm text-slate-500 hover:text-primary transition-colors"
         >
           <span className="material-symbols-outlined text-base">arrow_back</span>
-          返回原油对比
+          返回原油
         </Link>
         <h1 className="text-xl font-bold">近30交易日原油数据</h1>
       </div>

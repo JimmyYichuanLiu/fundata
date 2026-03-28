@@ -137,10 +137,17 @@ export default function CrudeOilComparison() {
   const [scrubStart, setScrubStart] = useState(0)
   const [scrubEnd,   setScrubEnd]   = useState(0)
 
-  // Reset scrubber to full range when items change
+  // Reset scrubber to last 3 months when items change
   useEffect(() => {
-    setScrubStart(0)
-    setScrubEnd(Math.max(0, items.length - 1))
+    if (items.length === 0) return
+    setScrubEnd(items.length - 1)
+    const lastDate = items[items.length - 1].trade_date
+    const last = new Date(lastDate.slice(0, 4) + '-' + lastDate.slice(4, 6) + '-' + lastDate.slice(6, 8))
+    const cutoffDate = new Date(last)
+    cutoffDate.setDate(cutoffDate.getDate() - 90)
+    const cutoff = cutoffDate.toISOString().slice(0, 10).replace(/-/g, '')
+    const startIdx = items.findIndex(it => it.trade_date >= cutoff)
+    setScrubStart(startIdx >= 0 ? startIdx : 0)
   }, [items])
 
   // Visible slice for chart
@@ -911,12 +918,12 @@ export default function CrudeOilComparison() {
         </div>
 
         {/* 全部新闻入口 */}
-        <div className="flex justify-end">
+        <div className="flex justify-end mt-2">
           <a
             href="/news"
-            className="flex items-center gap-1.5 px-4 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-lg text-sm font-medium transition-colors"
+            className="flex items-center gap-2 px-6 py-3 bg-slate-700 hover:bg-slate-600 text-white rounded-xl text-base font-semibold transition-colors shadow"
           >
-            <span className="material-symbols-outlined text-base">newspaper</span>
+            <span className="material-symbols-outlined text-xl">newspaper</span>
             查看全部新闻
           </a>
         </div>

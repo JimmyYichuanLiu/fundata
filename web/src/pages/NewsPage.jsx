@@ -159,7 +159,7 @@ export default function NewsPage() {
             className="flex items-center gap-1 text-sm text-slate-500 hover:text-primary transition-colors"
           >
             <span className="material-symbols-outlined text-base">arrow_back</span>
-            原油对比
+            原油
           </Link>
           <h1 className="text-xl font-bold">全部新闻</h1>
           {total > 0 && <span className="text-sm text-slate-400">共 {total} 条</span>}

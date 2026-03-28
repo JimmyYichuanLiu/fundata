@@ -6,7 +6,7 @@ const NAV_ITEMS = [
   { to: '/market', icon: 'trending_up', label: '市场' },
   { to: '/compare', icon: 'compare_arrows', label: '基金对比' },
   { to: '/basis', icon: 'show_chart', label: '基差分析' },
-  { to: '/crude', icon: 'local_gas_station', label: '原油对比' },
+  { to: '/crude', icon: 'local_gas_station', label: '原油' },
 ]
 
 function SidebarLink({ to, icon, label }) {
@@ -30,8 +30,9 @@ function SidebarLink({ to, icon, label }) {
 
 export default function Layout({ children }) {
   const [dark, setDark] = useState(() => {
-    if (typeof window === 'undefined') return false
-    return localStorage.getItem('theme') === 'dark'
+    if (typeof window === 'undefined') return true
+    const saved = localStorage.getItem('theme')
+    return saved ? saved === 'dark' : true
   })
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const location = useLocation()
