@@ -1061,7 +1061,7 @@ export default function CrudeOilComparison() {
       <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm p-4">
         <div className="mb-3 flex items-center gap-2 flex-wrap">
           <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">多方视角对比</span>
-          <span className="text-xs text-slate-400">欧美官方 / 中国官方 / 伊朗官方 — 按相关度各取最高5条</span>
+          <span className="text-xs text-slate-400">美国官方 / 中国官方 / 伊朗官方 — 按相关度各取最高5条</span>
           {perspectives?.window && (
             <span className={`text-[11px] px-1.5 py-0.5 rounded font-medium ${
               perspectives.window === '24h'
@@ -1085,7 +1085,7 @@ export default function CrudeOilComparison() {
         {!perspectivesLoading && perspectives && (
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             {[
-              { key: 'west',  label: '欧美官方', badge: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400' },
+              { key: 'us',    label: '美国官方', badge: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400' },
               { key: 'china', label: '中国官方', badge: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' },
               { key: 'iran',  label: '伊朗官方', badge: 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400' },
             ].map(({ key, label, badge }) => (

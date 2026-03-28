@@ -3,20 +3,20 @@
 """
 原油与中东冲突新闻 RSS 抓取模块
 
-数据源（21个，免费、无需 token）：
+数据源（20个，免费、无需 token）：
   - USNI News          https://news.usni.org/feed               — 美海军/霍尔木兹专项
   - OilPrice.com       https://oilprice.com/rss/main            — 原油市场（全量收录）
   - Al Jazeera         https://www.aljazeera.com/xml/rss/all.xml — 中东冲突（关键词过滤）
-  - IAEA               https://www.iaea.org/feeds/topnews       — 国际原子能机构
   - White House        Google News RSS site:whitehouse.gov       — 美国白宫
   - State Dept         Google News RSS site:state.gov           — 美国国务院
   - Pentagon           Google News RSS site:defense.gov         — 美国国防部
   - Treasury Dept      Google News RSS site:treasury.gov        — 美国财政部
-  - UN News            https://news.un.org/feed/subscribe/en/news/all/rss.xml — 联合国
-  - Federal Reserve    https://www.federalreserve.gov/feeds/press_all.xml — 美联储
   - EIA                Google News RSS site:eia.gov             — 美国能源信息署
-  - NATO               Google News RSS site:nato.int            — 北约
-  - EU External Action Google News RSS site:eeas.europa.eu      — 欧盟对外行动署
+  - Federal Reserve    https://www.federalreserve.gov/feeds/press_all.xml — 美联储
+  - CENTCOM            Google News RSS site:centcom.mil         — 美国中央司令部
+  - US Energy Dept     Google News RSS site:energy.gov          — 美国能源部
+  - NSC                Google News RSS "National Security Council" — 美国国家安全委员会
+  - US Trade Rep       Google News RSS site:ustr.gov            — 美国贸易代表办公室
   - Press TV           Google News RSS site:presstv.ir          — 伊朗国家电视台
   - IRNA               Google News RSS site:irna.ir             — 伊朗官方通讯社
   - Tasnim News        Google News RSS site:tasnimnews.com      — 伊朗半官方通讯社
@@ -30,7 +30,7 @@
 
 数据库表：crude_news（写入 fund_data.db）
 
-category 合法值：conflict / shipping / crude / official_west / official_iran / official_china
+category 合法值：conflict / shipping / crude / official_us / official_iran / official_china
 priority：1~10，数值越小越重要
   - source_weight：官方源 2，USNI/航运 3，中东视角 4，通用媒体 5
   - topic_score：命中关键词扣分（Hormuz/tanker -2，missile/sanctions -2，oil/OPEC -1）
@@ -105,76 +105,76 @@ RSS_FEEDS = [
         "base_priority": 5,
     },
 
-    # ---- 新增：欧美官方来源 ----
-    {
-        "name": "IAEA",
-        "url": "https://www.iaea.org/feeds/topnews",
-        "default_category": "official_west",
-        "keywords": None,
-        "base_priority": 2,
-    },
+    # ---- 美国官方来源（10个） ----
     {
         "name": "White House",
         "url": _google_news_rss("site:whitehouse.gov Iran OR sanctions OR oil OR energy OR Gulf when:3d"),
-        "default_category": "official_west",
+        "default_category": "official_us",
         "keywords": ["Iran", "sanctions", "oil", "energy", "Gulf", "nuclear", "OPEC", "Middle East", "Hormuz"],
         "base_priority": 2,
     },
     {
         "name": "State Dept",
         "url": _google_news_rss("site:state.gov Iran OR sanctions OR oil OR energy OR Gulf when:3d"),
-        "default_category": "official_west",
+        "default_category": "official_us",
         "keywords": ["Iran", "sanctions", "oil", "energy", "Gulf", "nuclear", "JCPOA", "Middle East", "Hormuz"],
         "base_priority": 2,
     },
     {
         "name": "Pentagon",
         "url": _google_news_rss("site:defense.gov Iran OR Gulf OR Middle East OR military when:3d"),
-        "default_category": "official_west",
+        "default_category": "official_us",
         "keywords": ["Iran", "Gulf", "Middle East", "military", "deployment", "Hormuz"],
         "base_priority": 2,
     },
     {
         "name": "Treasury Dept",
         "url": _google_news_rss("site:treasury.gov sanctions OR Iran OR oil when:7d"),
-        "default_category": "official_west",
+        "default_category": "official_us",
         "keywords": ["sanctions", "Iran", "oil", "embargo", "financial"],
         "base_priority": 2,
     },
     {
-        "name": "UN News",
-        "url": "https://news.un.org/feed/subscribe/en/news/all/rss.xml",
-        "default_category": "official_west",
-        "keywords": ["Iran", "sanctions", "nuclear", "Middle East", "oil", "Gulf", "IAEA", "Security Council"],
+        "name": "EIA",
+        "url": _google_news_rss("site:eia.gov oil OR gas OR energy OR crude when:7d"),
+        "default_category": "official_us",
+        "keywords": ["oil", "crude", "energy", "production", "inventory", "price"],
         "base_priority": 2,
     },
     {
         "name": "Federal Reserve",
         "url": "https://www.federalreserve.gov/feeds/press_all.xml",
-        "default_category": "official_west",
+        "default_category": "official_us",
         "keywords": ["oil", "energy", "inflation", "commodity", "price"],
         "base_priority": 3,
     },
     {
-        "name": "EIA",
-        "url": _google_news_rss("site:eia.gov oil OR gas OR energy OR crude when:7d"),
-        "default_category": "official_west",
-        "keywords": ["oil", "crude", "energy", "production", "inventory", "price"],
+        "name": "CENTCOM",
+        "url": _google_news_rss("site:centcom.mil Iran OR Gulf OR Hormuz OR Middle East when:7d"),
+        "default_category": "official_us",
+        "keywords": ["Iran", "Gulf", "Hormuz", "Middle East", "military", "operation"],
         "base_priority": 2,
     },
     {
-        "name": "NATO",
-        "url": _google_news_rss("site:nato.int Iran OR Middle East OR Gulf when:7d"),
-        "default_category": "official_west",
-        "keywords": ["Iran", "Middle East", "Gulf", "security", "military"],
+        "name": "US Energy Dept",
+        "url": _google_news_rss("site:energy.gov oil OR crude OR energy OR Iran when:7d"),
+        "default_category": "official_us",
+        "keywords": ["oil", "crude", "energy", "Iran", "sanctions"],
         "base_priority": 2,
     },
     {
-        "name": "EU External Action",
-        "url": _google_news_rss("site:eeas.europa.eu Iran OR nuclear OR sanctions OR energy when:7d"),
-        "default_category": "official_west",
-        "keywords": ["Iran", "nuclear", "JCPOA", "sanctions", "energy", "oil"],
+        "name": "NSC",
+        "url": _google_news_rss("\"National Security Council\" Iran OR Middle East OR oil when:7d"),
+        "default_category": "official_us",
+        "keywords": ["Iran", "Middle East", "oil", "security", "Gulf"],
         "base_priority": 2,
+    },
+    {
+        "name": "US Trade Rep",
+        "url": _google_news_rss("site:ustr.gov Iran OR sanctions OR trade OR oil when:14d"),
+        "default_category": "official_us",
+        "keywords": ["Iran", "sanctions", "trade", "oil", "embargo"],
+        "base_priority": 3,
     },
 
     # ---- 新增：伊朗官方来源（替换 Iran International） ----

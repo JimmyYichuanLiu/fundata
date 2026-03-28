@@ -11,7 +11,7 @@ const NEWS_CATEGORIES = [
   { key: 'conflict',      label: '冲突'   },
   { key: 'shipping',      label: '运输'   },
   { key: 'crude',         label: '原油'   },
-  { key: 'official_west', label: '欧美官方' },
+  { key: 'official_us',   label: '美国官方' },
   { key: 'official_iran', label: '伊朗官方' },
   { key: 'official_china',label: '中国官方' },
 ]
@@ -20,12 +20,19 @@ const CATEGORY_BADGE = {
   conflict:       'bg-rose-100 text-rose-600 dark:bg-rose-900/30 dark:text-rose-400',
   shipping:       'bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400',
   crude:          'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400',
-  official_west:  'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400',
+  official_us:    'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400',
   official_iran:  'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400',
   official_china: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400',
 }
 
 const CATEGORY_LABEL = {
+  conflict:       '冲突',
+  shipping:       '运输',
+  crude:          '原油',
+  official_us:    '美国官方',
+  official_iran:  '伊朗官方',
+  official_china: '中国官方',
+}
   conflict:       '冲突',
   shipping:       '运输',
   crude:          '原油',

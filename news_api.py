@@ -36,14 +36,14 @@ news_router = APIRouter(prefix="/api/news", tags=["news"])
 _news_sync_lock = threading.Lock()
 
 # 合法的 category 值
-VALID_CATEGORIES = {"conflict", "shipping", "crude", "official_west", "official_iran", "official_china"}
+VALID_CATEGORIES = {"conflict", "shipping", "crude", "official_us", "official_iran", "official_china"}
 
 # 分类中文名（用于 focus_text 生成）
 _CATEGORY_ZH = {
     "conflict":       "冲突动态",
     "shipping":       "航运运输",
     "crude":          "原油市场",
-    "official_west":  "欧美官方",
+    "official_us":    "美国官方",
     "official_iran":  "伊朗官方",
     "official_china": "中国官方",
 }
@@ -422,15 +422,16 @@ def get_hormuz_news(
 # GET /api/news/perspectives  — 多方视角对比
 # ---------------------------------------------------------------------------
 
-@news_router.get("/perspectives", summary="多方视角对比（欧美/中国/伊朗官方，各取相关度最高5条）")
+@news_router.get("/perspectives", summary="多方视角对比（美国/中国/伊朗官方，聚焦伊朗/霍尔木兹/原油主题）")
 def get_news_perspectives():
     """
-    返回三方官方立场新闻，各取按相关度（priority ASC）排列的前5条。
-    三级回退：24h → 7d → 30d，确保有足够数据。
+    返回三方官方立场新闻，聚焦核心主题（伊朗/霍尔木兹/原油/制裁/核协议）。
+    筛选策略：优先核心主题新闻，不足5条时回退到所有高优先级（priority<=3）。
+    时间窗口：24h → 7d → 30d 三级回退。
 
     响应格式：
     {
-      "west":  [{ "id", "title", "title_zh", "url", "source_name", "published_at", "priority" }, ...],
+      "us":    [{ "id", "title", "title_zh", "url", "source_name", "published_at", "priority" }, ...],
       "china": [...],
       "iran":  [...],
       "window": "24h" | "7d" | "30d"
@@ -444,34 +445,69 @@ def get_news_perspectives():
         cutoff_7d  = (now - timedelta(days=7)).isoformat()
         cutoff_30d = (now - timedelta(days=30)).isoformat()
 
+        # 核心监控主题关键词（聚焦伊朗/中东/原油）
+        core_topics = [
+            "Iran", "Iranian", "Tehran",
+            "Hormuz", "Strait of Hormuz",
+            "oil tanker", "crude oil", "crude", "OPEC",
+            "nuclear", "JCPOA", "enrichment",
+            "Houthi", "Red Sea", "Yemen",
+            "Gulf", "Persian Gulf", "Middle East",
+            "Israel", "Gaza", "Lebanon", "Hezbollah"
+        ]
+
         def _fetch(cat: str, cutoff: str) -> list:
+            # 第一优先级：核心主题新闻
+            conditions = " OR ".join(f"title LIKE ?" for _ in core_topics)
+            params = [cat, cutoff] + [f"%{kw}%" for kw in core_topics]
             rows = conn.execute(
-                """
+                f"""
                 SELECT id, title, title_zh, url, source_name, published_at, priority
                 FROM crude_news
                 WHERE category = ? AND COALESCE(published_at, fetched_at) >= ?
+                  AND ({conditions})
                 ORDER BY priority ASC, published_at DESC
                 LIMIT 5
                 """,
-                (cat, cutoff),
+                params,
             ).fetchall()
-            return [dict(r) for r in rows]
+            result = [dict(r) for r in rows]
 
-        # 三级回退：24h → 7d → 30d
-        west_24h  = _fetch("official_west",  cutoff_24h)
+            # 回退：如果不足5条，补充高优先级新闻（priority <= 3）
+            if len(result) < 5:
+                existing_ids = [r["id"] for r in result]
+                id_placeholders = ",".join("?" for _ in existing_ids) if existing_ids else "NULL"
+                fallback_rows = conn.execute(
+                    f"""
+                    SELECT id, title, title_zh, url, source_name, published_at, priority
+                    FROM crude_news
+                    WHERE category = ? AND COALESCE(published_at, fetched_at) >= ?
+                      AND priority <= 3
+                      AND id NOT IN ({id_placeholders})
+                    ORDER BY priority ASC, published_at DESC
+                    LIMIT ?
+                    """,
+                    [cat, cutoff] + existing_ids + [5 - len(result)],
+                ).fetchall()
+                result.extend([dict(r) for r in fallback_rows])
+
+            return result
+
+        # 三级时间窗口回退：24h → 7d → 30d
+        us_24h    = _fetch("official_us",    cutoff_24h)
         china_24h = _fetch("official_china", cutoff_24h)
         iran_24h  = _fetch("official_iran",  cutoff_24h)
-        if west_24h or china_24h or iran_24h:
-            return {"west": west_24h, "china": china_24h, "iran": iran_24h, "window": "24h"}
+        if us_24h or china_24h or iran_24h:
+            return {"us": us_24h, "china": china_24h, "iran": iran_24h, "window": "24h"}
 
-        west_7d  = _fetch("official_west",  cutoff_7d)
+        us_7d    = _fetch("official_us",    cutoff_7d)
         china_7d = _fetch("official_china", cutoff_7d)
         iran_7d  = _fetch("official_iran",  cutoff_7d)
-        if west_7d or china_7d or iran_7d:
-            return {"west": west_7d, "china": china_7d, "iran": iran_7d, "window": "7d"}
+        if us_7d or china_7d or iran_7d:
+            return {"us": us_7d, "china": china_7d, "iran": iran_7d, "window": "7d"}
 
         return {
-            "west":   _fetch("official_west",  cutoff_30d),
+            "us":     _fetch("official_us",    cutoff_30d),
             "china":  _fetch("official_china", cutoff_30d),
             "iran":   _fetch("official_iran",  cutoff_30d),
             "window": "30d",
