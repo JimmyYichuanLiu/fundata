@@ -272,8 +272,8 @@ export default function NewsPage() {
         )}
 
         {!loading && items.map(item => (
-          <div key={item.id} className="px-4 py-3 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
-            <div className="flex items-start justify-between gap-3">
+          <div key={item.id} className="px-4 py-3.5 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
+            <div className="flex items-start justify-between gap-2">
               <div className="flex items-start gap-2 flex-1 min-w-0">
                 <span className={`mt-1.5 shrink-0 w-2 h-2 rounded-full ${priorityDot(item.priority ?? 5)}`} />
                 <div className="min-w-0">
@@ -282,7 +282,7 @@ export default function NewsPage() {
                     target="_blank"
                     rel="noopener noreferrer"
                     title={item.title_zh ? item.title : undefined}
-                    className="text-sm font-medium text-slate-800 dark:text-slate-100 hover:text-primary leading-snug"
+                    className="text-sm font-medium text-slate-800 dark:text-slate-100 hover:text-primary leading-snug line-clamp-2 sm:line-clamp-none"
                   >
                     {item.title_zh || item.title}
                   </a>

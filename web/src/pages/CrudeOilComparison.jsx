@@ -67,7 +67,7 @@ const NEWS_CATEGORIES = [
   { key: 'conflict',      label: '冲突'   },
   { key: 'shipping',      label: '运输'   },
   { key: 'crude',         label: '原油'   },
-  { key: 'official_west', label: '欧美官方' },
+  { key: 'official_us',   label: '美国官方' },
   { key: 'official_iran', label: '伊朗官方' },
   { key: 'official_china',label: '中国官方' },
 ]
@@ -77,7 +77,7 @@ const CATEGORY_BADGE = {
   conflict:       'bg-rose-100 text-rose-600 dark:bg-rose-900/30 dark:text-rose-400',
   shipping:       'bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400',
   crude:          'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400',
-  official_west:  'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400',
+  official_us:    'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400',
   official_iran:  'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400',
   official_china: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400',
 }
@@ -86,9 +86,9 @@ const CATEGORY_LABEL = {
   conflict:       '冲突',
   shipping:       '运输',
   crude:          '原油',
-  official_west:  '欧美官方',
-  official_iran:  '伊朗官方',
-  official_china: '中国官方',
+  official_us:    '美国',
+  official_iran:  '伊朗',
+  official_china: '中国',
 }
 
 // priority 颜色指示点
@@ -459,13 +459,17 @@ export default function CrudeOilComparison() {
 
   const chartOptions = {
     responsive: true,
+    maintainAspectRatio: true,
     interaction: { mode: 'index', intersect: false },
     plugins: {
-      legend: { position: 'top' },
+      legend: {
+        position: 'top',
+        labels: { boxWidth: 12, padding: 10, font: { size: 11 } },
+      },
       title: {
         display: true,
-        text: '全球原油价格对比（WTI / Brent / 上海SC，均以 USD/桶计）',
-        font: { size: 15 },
+        text: 'WTI / Brent / 上海SC（USD/桶）',
+        font: { size: 13 },
       },
       tooltip: {
         callbacks: {
@@ -483,13 +487,14 @@ export default function CrudeOilComparison() {
     },
     scales: {
       x: {
-        ticks: { maxTicksLimit: 12, maxRotation: 0 },
+        ticks: { maxTicksLimit: 6, maxRotation: 0, font: { size: 10 } },
       },
       y: {
         type:     'linear',
         position: 'left',
-        title:    { display: true, text: 'USD / 桶' },
+        title:    { display: true, text: 'USD / 桶', font: { size: 11 } },
         grid:     { color: 'rgba(0,0,0,0.05)' },
+        ticks:    { font: { size: 10 } },
       },
     },
   }
@@ -504,16 +509,16 @@ export default function CrudeOilComparison() {
     <div className="px-4 py-4 md:p-6 max-w-7xl mx-auto space-y-6">
 
       {/* 页头 */}
-      <div className="flex flex-wrap items-center justify-between gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold">原油价格对比</h1>
-          <p className="text-slate-500 text-sm mt-1">
+          <h1 className="text-xl md:text-2xl font-bold">原油价格对比</h1>
+          <p className="text-slate-500 text-xs md:text-sm mt-0.5 hidden sm:block">
             WTI（NYMEX）· Brent（ICE）· 上海原油SC（INE）— 日频收盘价
           </p>
         </div>
 
         {/* 同步区域 */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 flex-wrap">
           {syncStatus && (
             <span className={`text-xs px-2 py-1 rounded-full font-medium ${statusBadge(syncStatus.last_status)}`}>
               {syncStatus.last_status === 'success' ? '数据正常' :
@@ -523,14 +528,14 @@ export default function CrudeOilComparison() {
             </span>
           )}
           {syncStatus?.last_time && (
-            <span className="text-xs text-slate-400">
+            <span className="text-xs text-slate-400 hidden sm:inline">
               最近同步：{syncStatus.last_time.slice(0, 16)}
             </span>
           )}
           <button
             onClick={handleSync}
             disabled={syncing}
-            className="px-4 py-2 bg-primary text-white rounded-lg text-sm font-medium hover:bg-primary/90 disabled:opacity-50 transition-colors"
+            className="px-3 py-1.5 md:px-4 md:py-2 bg-primary text-white rounded-lg text-sm font-medium hover:bg-primary/90 disabled:opacity-50 transition-colors"
           >
             {syncing ? '同步中…' : '立即同步'}
           </button>
@@ -550,12 +555,12 @@ export default function CrudeOilComparison() {
       )}
 
       {/* 日期范围选择器 */}
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
         {RANGE_OPTIONS.map((opt, i) => (
           <button
             key={opt.label}
             onClick={() => { setRangeIdx(i); setUseCustom(false) }}
-            className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+            className={`px-2.5 py-1 sm:px-3 sm:py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-colors ${
               !useCustom && rangeIdx === i
                 ? 'bg-primary text-white'
                 : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'
@@ -565,8 +570,8 @@ export default function CrudeOilComparison() {
           </button>
         ))}
 
-        {/* 自定义日期 */}
-        <div className="flex items-center gap-2 ml-2">
+        {/* 自定义日期（仅桌面端显示） */}
+        <div className="hidden sm:flex items-center gap-2 ml-2">
           <input
             type="date"
             value={customFrom}
@@ -584,7 +589,7 @@ export default function CrudeOilComparison() {
 
         {latestDate && (
           <span className="text-xs text-slate-400 ml-auto">
-            数据最新：{yyyymmddToDisplay(latestDate)}
+            最新：{yyyymmddToDisplay(latestDate)}
           </span>
         )}
       </div>
@@ -649,32 +654,32 @@ export default function CrudeOilComparison() {
           return (
             <div className="group relative">
               <div
-                className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700 p-4 shadow-sm h-full"
+                className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700 p-3 md:p-4 shadow-sm h-full"
                 style={{ borderLeft: `4px solid ${color}` }}
               >
-                <div className="text-xs text-slate-400 mb-0.5 flex items-center gap-1">
+                <div className="text-[11px] md:text-xs text-slate-400 mb-0.5 flex items-center gap-1">
                   {SYMBOL_META[sym]?.label || sym}
                   <span className="text-slate-300 dark:text-slate-600 cursor-help">ⓘ</span>
                 </div>
-                <div className="text-2xl font-bold text-slate-800 dark:text-slate-100">
+                <div className="text-xl md:text-2xl font-bold text-slate-800 dark:text-slate-100">
                   {displayVal}
                 </div>
-                <div className="text-xs text-slate-400 mt-0.5">USD/桶</div>
+                <div className="text-[11px] md:text-xs text-slate-400 mt-0.5">USD/桶</div>
                 {isSC && last?.SC != null && (
-                  <div className="text-xs text-slate-400 mt-0.5">
-                    ≈ ¥{last.SC.toFixed(2)} CNY
-                    {last.SC_RATE && <span className="ml-1">(汇率 {last.SC_RATE})</span>}
+                  <div className="text-[11px] md:text-xs text-slate-400 mt-0.5">
+                    ≈ ¥{last.SC.toFixed(0)} CNY
+                    {last.SC_RATE && <span className="ml-1 hidden sm:inline">(汇率 {last.SC_RATE})</span>}
                   </div>
                 )}
                 {last && (
-                  <div className="text-xs text-slate-400 mt-1">{yyyymmddToDisplay(last.trade_date)}</div>
+                  <div className="text-[11px] md:text-xs text-slate-400 mt-1">{yyyymmddToDisplay(last.trade_date)}</div>
                 )}
                 {SYMBOL_META[sym]?.reference && (
                   <div className="text-[10px] text-amber-500 mt-1">⚠ 参考价</div>
                 )}
               </div>
-              {/* Hover tooltip */}
-              <div className="pointer-events-none absolute bottom-full left-0 mb-2 z-50 hidden group-hover:block w-64">
+              {/* Hover/active tooltip */}
+              <div className="pointer-events-none absolute bottom-full left-0 mb-2 z-50 hidden group-hover:block group-active:block w-56 md:w-64">
                 <div className="bg-slate-800 text-white text-xs rounded-lg px-3 py-2 shadow-xl whitespace-pre-line leading-relaxed">
                   {SPECS[sym]}
                 </div>
@@ -685,22 +690,32 @@ export default function CrudeOilComparison() {
         }
 
         return (
-          <div className="grid grid-cols-3 gap-3">
-            {/* 左列：WTI 上 / Brent 下 */}
-            <div className="flex flex-col gap-3">
+          <>
+            {/* 移动端：2列，SC全宽 */}
+            <div className="grid grid-cols-2 gap-2 sm:hidden">
               <PriceCard sym="WTI"   color={SYMBOL_COLORS.WTI.border} />
               <PriceCard sym="BRENT" color={SYMBOL_COLORS.BRENT.border} />
-            </div>
-            {/* 中列：上海SC（大卡片） */}
-            <div>
-              <PriceCard sym="SC" color={SYMBOL_COLORS.SC.border} />
-            </div>
-            {/* 右列：Murban 上 / DME Oman 下 */}
-            <div className="flex flex-col gap-3">
+              <div className="col-span-2">
+                <PriceCard sym="SC" color={SYMBOL_COLORS.SC.border} />
+              </div>
               <PriceCard sym="MURBAN"   color={SYMBOL_COLORS.MURBAN.border} />
               <PriceCard sym="DME_OMAN" color={SYMBOL_COLORS.DME_OMAN.border} />
             </div>
-          </div>
+            {/* 桌面端：原3列布局 */}
+            <div className="hidden sm:grid sm:grid-cols-3 gap-3">
+              <div className="flex flex-col gap-3">
+                <PriceCard sym="WTI"   color={SYMBOL_COLORS.WTI.border} />
+                <PriceCard sym="BRENT" color={SYMBOL_COLORS.BRENT.border} />
+              </div>
+              <div>
+                <PriceCard sym="SC" color={SYMBOL_COLORS.SC.border} />
+              </div>
+              <div className="flex flex-col gap-3">
+                <PriceCard sym="MURBAN"   color={SYMBOL_COLORS.MURBAN.border} />
+                <PriceCard sym="DME_OMAN" color={SYMBOL_COLORS.DME_OMAN.border} />
+              </div>
+            </div>
+          </>
         )
       })()}
 
@@ -719,44 +734,45 @@ export default function CrudeOilComparison() {
 
       {/* 数据来源注释 + 时区说明 */}
       <div className="text-xs text-slate-400 space-y-1">
-        <p>数据来源：WTI / Brent — akshare（新浪财经国际期货）；上海SC — akshare（新浪财经，SC888主力连续合约）；Murban / DME Oman — oilprice.com（参考价，非官方）</p>
-        <p>SC价格为人民币计价（右Y轴），WTI / Brent / Murban / DME Oman 为美元计价（左Y轴），单位均为"元/桶"</p>
-        <p className="flex flex-wrap gap-x-4 gap-y-0.5 mt-1">
+        <p className="hidden sm:block">数据来源：WTI / Brent — akshare（新浪财经国际期货）；上海SC — akshare（新浪财经，SC888主力连续合约）；Murban / DME Oman — oilprice.com（参考价，非官方）</p>
+        <p className="sm:hidden">数据来源：akshare（WTI/Brent/SC）· oilprice.com（Murban/DME Oman 参考价）</p>
+        <p>SC价格已换算为 USD/桶，与 WTI / Brent 同轴对比</p>
+        <p className="hidden sm:flex flex-wrap gap-x-4 gap-y-0.5 mt-1">
           <span>🕐 <strong>WTI</strong>：NYMEX（纽约，UTC-5/UTC-4）</span>
           <span>🕐 <strong>Brent</strong>：ICE（伦敦，UTC+0/UTC+1）</span>
           <span>🕐 <strong>上海SC</strong>：INE（上海，UTC+8）</span>
           <span>🕐 <strong>Murban</strong>：ICE Abu Dhabi（阿布扎比，UTC+4）</span>
           <span>🕐 <strong>DME Oman</strong>：DME（迪拜，UTC+4）</span>
         </p>
-        <p className="text-slate-300 dark:text-slate-600">虚线品种（Murban / DME Oman）为参考价，数据来源为第三方抓取，仅供参考</p>
+        <p className="text-slate-300 dark:text-slate-600 hidden sm:block">虚线品种（Murban / DME Oman）为参考价，数据来源为第三方抓取，仅供参考</p>
       </div>
 
       {/* ── 中东冲突与原油新闻 ────────────────────────────────────────────── */}
       <div className="space-y-3">
         {/* 新闻区标题行 */}
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="text-lg font-semibold">中东冲突与原油观察</h2>
-            <p className="text-xs text-slate-400 mt-0.5">
-              来源：USNI News · OilPrice.com · Al Jazeera · IAEA · Iran International · White House · State Dept · The National · Reuters Energy · 航运聚合
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="min-w-0">
+            <h2 className="text-base md:text-lg font-semibold">中东冲突与原油观察</h2>
+            <p className="text-xs text-slate-400 mt-0.5 line-clamp-1 sm:line-clamp-none">
+              USNI · OilPrice · Al Jazeera · White House · State Dept · Reuters
               {newsTotal > 0 && <span className="ml-2">共 {newsTotal} 条</span>}
             </p>
           </div>
 
-          <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex items-center gap-2 shrink-0">
             {/* 同步状态 */}
             {newsSyncStatus && (
               <span className={`text-xs px-2 py-1 rounded-full font-medium ${statusBadge(newsSyncStatus.last_status)}`}>
-                {newsSyncStatus.last_status === 'success' ? '新闻正常'
+                {newsSyncStatus.last_status === 'success' ? '正常'
                   : newsSyncStatus.last_status === 'running' ? '同步中'
                   : newsSyncStatus.last_status === 'never' ? '未同步'
-                  : '同步异常'}
+                  : '异常'}
               </span>
             )}
             <button
               onClick={handleNewsSync}
               disabled={newsSyncing}
-              className="px-3 py-1.5 bg-slate-700 text-white rounded-lg text-xs font-medium hover:bg-slate-600 disabled:opacity-50 transition-colors"
+              className="px-3 py-2 bg-slate-700 text-white rounded-lg text-xs font-medium hover:bg-slate-600 disabled:opacity-50 transition-colors"
             >
               {newsSyncing ? '同步中…' : '抓取新闻'}
             </button>
@@ -851,7 +867,7 @@ export default function CrudeOilComparison() {
                               target="_blank"
                               rel="noopener noreferrer"
                               title={item.title_zh ? item.title : undefined}
-                              className="text-sm text-slate-800 dark:text-slate-100 hover:text-primary leading-snug line-clamp-1"
+                              className="text-sm text-slate-800 dark:text-slate-100 hover:text-primary leading-snug line-clamp-2 sm:line-clamp-1"
                             >
                               {item.title_zh || item.title}
                             </a>
@@ -873,9 +889,9 @@ export default function CrudeOilComparison() {
 
         {/* Hormuz / 航运观察 */}
         <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm p-4">
-          <div className="flex items-center gap-2 mb-3">
+          <div className="flex items-center gap-2 mb-3 flex-wrap">
             <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">航运 / Hormuz 观察</span>
-            <span className="text-xs text-slate-400">关键词：Hormuz · tanker · Red Sea · shipping · strait</span>
+            <span className="text-xs text-slate-400 hidden sm:inline">关键词：Hormuz · tanker · Red Sea · shipping · strait</span>
           </div>
           {hormuzLoading && (
             <div className="flex items-center gap-2 text-slate-400 text-sm">
@@ -897,7 +913,7 @@ export default function CrudeOilComparison() {
                       target="_blank"
                       rel="noopener noreferrer"
                       title={item.title_zh ? item.title : undefined}
-                      className="text-sm text-slate-800 dark:text-slate-100 hover:text-primary leading-snug line-clamp-1"
+                      className="text-sm text-slate-800 dark:text-slate-100 hover:text-primary leading-snug line-clamp-2 sm:line-clamp-1"
                     >
                       {item.title_zh || item.title}
                     </a>
@@ -921,7 +937,7 @@ export default function CrudeOilComparison() {
         <div className="flex justify-end mt-2">
           <a
             href="/news"
-            className="flex items-center gap-2 px-6 py-3 bg-slate-700 hover:bg-slate-600 text-white rounded-xl text-base font-semibold transition-colors shadow"
+            className="flex items-center justify-center gap-2 w-full sm:w-auto px-6 py-3 bg-slate-700 hover:bg-slate-600 text-white rounded-xl text-base font-semibold transition-colors shadow"
           >
             <span className="material-symbols-outlined text-xl">newspaper</span>
             查看全部新闻
