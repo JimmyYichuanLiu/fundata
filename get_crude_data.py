@@ -791,7 +791,9 @@ def connect_and_fetch_crude(db_path: str = DB_PATH):
     完整同步一次所有三个原油品种，并执行 yfinance 交叉验证。
     设计原则：单品种失败不影响其他品种；sync_state 记录状态供 API 查询。
     """
-    conn = sqlite3.connect(db_path, check_same_thread=False)
+    conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     try:
         init_crude_db(conn)
         init_cross_db(conn)

@@ -119,7 +119,6 @@ def get_crude_sync_status():
 @crude_router.post("/sync/trigger", summary="手动触发原油同步")
 def trigger_crude_sync(background_tasks: BackgroundTasks):
     """在后台启动一次原油数据同步，立即返回。"""
-    _ensure_table()
     background_tasks.add_task(_run_crude_sync)
     return {"message": "原油数据同步已启动"}
 
