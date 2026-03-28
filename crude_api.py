@@ -46,17 +46,22 @@ _crude_sync_lock = threading.Lock()
 # ---------------------------------------------------------------------------
 
 def _get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
 
 
 def _get_sync_key(key: str) -> str:
-    with _get_db() as conn:
+    conn = _get_db()
+    try:
         row = conn.execute(
             "SELECT value FROM sync_state WHERE key=?", (key,)
         ).fetchone()
         return row["value"] if row else ""
+    finally:
+        conn.close()
 
 
 def _run_crude_sync():
@@ -158,7 +163,7 @@ def get_crude_daily_compare(
 
         # 拉取所有品种的数据
         rows = conn.execute(
-            f"SELECT ts_code, trade_date, close FROM crude_daily {where} "
+            f"SELECT ts_code, trade_date, close, data_source, is_reference FROM crude_daily {where} "
             f"ORDER BY trade_date DESC",
             params,
         ).fetchall()
@@ -170,6 +175,10 @@ def get_crude_daily_compare(
             if d not in date_map:
                 date_map[d] = {"trade_date": d}
             date_map[d][r["ts_code"]] = r["close"]
+            # 标注参考数据
+            if r["is_reference"]:
+                date_map[d][f"{r['ts_code']}_is_reference"] = True
+                date_map[d][f"{r['ts_code']}_data_source"] = r["data_source"]
 
         # 按日期降序排列，截取 limit 条
         sorted_dates = sorted(date_map.keys(), reverse=True)[:limit]
@@ -220,7 +229,7 @@ def get_crude_symbol_daily(
 
         where = "WHERE " + " AND ".join(conditions)
         rows = conn.execute(
-            f"SELECT trade_date, open, high, low, close, volume, currency "
+            f"SELECT trade_date, open, high, low, close, volume, currency, data_source, is_reference "
             f"FROM crude_daily {where} "
             f"ORDER BY trade_date DESC LIMIT ?",
             params + [limit],

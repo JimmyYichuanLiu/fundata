@@ -80,6 +80,15 @@ except ImportError:
     _run_news_sync_bg = None
     _NEWS_ENABLED = False
 
+# 霍尔木兹 AIS 模块（独立，失败不影响主 API）
+try:
+    from hormuz_api import hormuz_router as _hormuz_router, _run_ais_sync as _run_ais_sync_bg
+    _HORMUZ_ENABLED = True
+except ImportError:
+    _hormuz_router = None
+    _run_ais_sync_bg = None
+    _HORMUZ_ENABLED = False
+
 try:
     from get_market_data import (
         connect_and_fetch_market as _connect_and_fetch_market,
@@ -199,6 +208,9 @@ async def lifespan(app: FastAPI):
     if _NEWS_ENABLED:
         # 新闻同步：每 2 小时抓取一次 RSS
         _scheduler.add_job(_run_news_sync_bg, "interval", hours=2)
+    if _HORMUZ_ENABLED:
+        # AIS 采集：每 30 分钟一次
+        _scheduler.add_job(_run_ais_sync_bg, "interval", minutes=30)
     _scheduler.start()
     logger.info("Scheduler started")
     yield
@@ -227,6 +239,10 @@ if _CRUDE_ENABLED:
 # 挂载新闻路由（独立模块）
 if _NEWS_ENABLED:
     app.include_router(_news_router)
+
+# 挂载霍尔木兹路由（独立模块）
+if _HORMUZ_ENABLED:
+    app.include_router(_hormuz_router)
 
 # =============================================================================
 # Section 4: Pydantic Models
@@ -409,9 +425,10 @@ async def generic_error_handler(request: Request, exc: Exception) -> JSONRespons
 
 @contextmanager
 def _get_raw_conn():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA foreign_keys=ON")
     try:
         yield conn

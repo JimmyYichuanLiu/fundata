@@ -3,26 +3,33 @@
 """
 原油与中东冲突新闻 RSS 抓取模块
 
-数据源（10个，免费、无需 token）：
+数据源（14个，免费、无需 token）：
   - USNI News          https://news.usni.org/feed               — 美海军/霍尔木兹专项
   - OilPrice.com       https://oilprice.com/rss/main            — 原油市场（全量收录）
   - Al Jazeera         https://www.aljazeera.com/xml/rss/all.xml — 中东冲突（关键词过滤）
   - IAEA               https://www.iaea.org/feeds/topnews       — 国际原子能机构（全量）
-  - Iran International Google News RSS                          — 伊朗/波斯湾局势
   - White House        Google News RSS site:whitehouse.gov       — 美国官方立场（关键词过滤）
   - State Dept         Google News RSS site:state.gov           — 国务院声明（关键词过滤）
+  - Press TV           Google News RSS site:presstv.ir          — 伊朗国家电视台（全量）
+  - IRNA               Google News RSS site:irna.ir             — 伊朗官方通讯社（全量）
+  - Tasnim News        Google News RSS site:tasnimnews.com      — 伊朗半官方通讯社（全量）
+  - 新华社             Google News 中文 RSS                     — 中国官方（中文直接存储）
+  - 中国日报           Google News 中文 RSS                     — 中国官方（中文直接存储）
+  - 环球时报           Google News 中文 RSS                     — 中国官方（中文直接存储）
+  - CGTN               Google News 中文 RSS                     — 中国官方（中文直接存储）
   - The National       Google News RSS site:thenationalnews.com — 阿联酋视角（关键词过滤）
   - Reuters Energy     Google News RSS site:reuters.com         — 路透能源（关键词过滤）
   - Hormuz/Shipping    Google News RSS 关键词聚合               — 航运/油轮动态
 
 数据库表：crude_news（写入 fund_data.db）
 
-category 合法值：conflict / shipping / crude / official_west / official_iran
+category 合法值：conflict / shipping / crude / official_west / official_iran / official_china
 priority：1~10，数值越小越重要
   - source_weight：官方源 2，USNI/航运 3，中东视角 4，通用媒体 5
   - topic_score：命中关键词扣分（Hormuz/tanker -2，missile/sanctions -2，oil/OPEC -1）
 title_zh：中文标题（None=未翻译，""=翻译失败，字符串=成功）
-  - 仅翻译 priority <= 4 的条目，限 200 字符，timeout=5s
+  - 中文源（is_chinese=True）：title 直接存为 title_zh，不调用翻译 API
+  - 英文源：仅翻译 priority <= 4 的条目，限 200 字符，timeout=5s
 """
 
 import json
@@ -120,13 +127,61 @@ RSS_FEEDS = [
         "base_priority": 2,
     },
 
-    # ---- 新增：伊朗官方/反对视角 ----
+    # ---- 新增：伊朗官方来源（替换 Iran International） ----
     {
-        "name": "Iran International",
-        "url": _google_news_rss("site:iranintl.com when:2d"),
+        "name": "Press TV",
+        "url": _google_news_rss("site:presstv.ir when:2d"),
         "default_category": "official_iran",
-        "keywords": None,           # 专门报道伊朗的英文媒体，全量收录
+        "keywords": None,           # 伊朗国家电视台英文频道，全量收录
         "base_priority": 2,
+    },
+    {
+        "name": "IRNA",
+        "url": _google_news_rss("site:irna.ir when:2d"),
+        "default_category": "official_iran",
+        "keywords": None,           # 伊朗官方通讯社，全量收录
+        "base_priority": 2,
+    },
+    {
+        "name": "Tasnim News",
+        "url": _google_news_rss("site:tasnimnews.com when:2d"),
+        "default_category": "official_iran",
+        "keywords": None,           # 伊朗半官方通讯社，全量收录
+        "base_priority": 3,
+    },
+
+    # ---- 新增：中国官方来源 ----
+    {
+        "name": "新华社",
+        "url": "https://news.google.com/rss/search?q=site:xinhuanet.com+%28Iran+OR+oil+OR+Hormuz+OR+Middle+East%29+when:2d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "default_category": "official_china",
+        "keywords": None,
+        "base_priority": 2,
+        "is_chinese": True,
+    },
+    {
+        "name": "中国日报",
+        "url": "https://news.google.com/rss/search?q=site:chinadaily.com.cn+%28Iran+OR+oil+OR+Hormuz+OR+Middle+East%29+when:2d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "default_category": "official_china",
+        "keywords": None,
+        "base_priority": 2,
+        "is_chinese": True,
+    },
+    {
+        "name": "环球时报",
+        "url": "https://news.google.com/rss/search?q=site:huanqiu.com+%28伊朗+OR+石油+OR+霍尔木兹+OR+中东%29+when:2d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "default_category": "official_china",
+        "keywords": None,
+        "base_priority": 3,
+        "is_chinese": True,
+    },
+    {
+        "name": "CGTN",
+        "url": "https://news.google.com/rss/search?q=site:cgtn.com+%28Iran+OR+oil+OR+Hormuz+OR+Middle+East%29+when:2d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+        "default_category": "official_china",
+        "keywords": None,
+        "base_priority": 2,
+        "is_chinese": True,
     },
 
     # ---- 新增：中东地区视角 ----
@@ -314,6 +369,7 @@ def _fetch_feed(conn: sqlite3.Connection, feed_cfg: dict) -> Tuple[int, str]:
     url = feed_cfg["url"]
     keywords = feed_cfg.get("keywords")
     category = feed_cfg["default_category"]
+    is_chinese = feed_cfg.get("is_chinese", False)  # 中文源：title 直接作为 title_zh
 
     logger.info("[%s] 开始抓取: %s", name, url[:80])
     try:
@@ -360,8 +416,14 @@ def _fetch_feed(conn: sqlite3.Connection, feed_cfg: dict) -> Tuple[int, str]:
             )
             if conn.execute("SELECT changes()").fetchone()[0] > 0:
                 added += 1
-                # 仅翻译高优先级新闻（priority <= 阈值），控制 HTTP 请求量
-                if priority <= TRANSLATE_PRIORITY_THRESHOLD:
+                # 中文源：title 本身就是中文，直接存为 title_zh
+                if is_chinese:
+                    conn.execute(
+                        "UPDATE crude_news SET title_zh = ? WHERE url = ?",
+                        (title, link),
+                    )
+                # 英文源：仅翻译高优先级新闻（priority <= 阈值），控制 HTTP 请求量
+                elif priority <= TRANSLATE_PRIORITY_THRESHOLD:
                     title_zh = _translate_to_zh(title)
                     if title_zh is not None:  # None 表示依赖未安装，不写入
                         conn.execute(

@@ -22,6 +22,10 @@ import {
   fetchNewsSummary,
   fetchNewsSources,
   fetchHormuzNews,
+  fetchPerspectives,
+  fetchHormuzCurrent,
+  fetchHormuzHistory,
+  triggerHormuzSync,
 } from '../api/crudeApi.js'
 import RangeScrubber from '../components/RangeScrubber.jsx'
 
@@ -41,15 +45,19 @@ const RANGE_OPTIONS = [
 ]
 
 const SYMBOL_COLORS = {
-  WTI:   { border: '#2563eb', background: 'rgba(37,99,235,0.08)'  },  // 蓝
-  BRENT: { border: '#16a34a', background: 'rgba(22,163,74,0.08)'  },  // 绿
-  SC:    { border: '#ea580c', background: 'rgba(234,88,12,0.08)'  },  // 橙
+  WTI:      { border: '#2563eb', background: 'rgba(37,99,235,0.08)'  },  // 蓝
+  BRENT:    { border: '#16a34a', background: 'rgba(22,163,74,0.08)'  },  // 绿
+  SC:       { border: '#ea580c', background: 'rgba(234,88,12,0.08)'  },  // 橙
+  MURBAN:   { border: '#7c3aed', background: 'rgba(124,58,237,0.08)' },  // 紫
+  DME_OMAN: { border: '#0891b2', background: 'rgba(8,145,178,0.08)'  },  // 青
 }
 
 const SYMBOL_META = {
-  WTI:   { label: 'WTI原油',    unit: 'USD/桶', yAxis: 'y'  },
-  BRENT: { label: 'Brent原油',  unit: 'USD/桶', yAxis: 'y'  },
-  SC:    { label: '上海原油SC', unit: 'CNY/桶', yAxis: 'y1' },
+  WTI:      { label: 'WTI原油',      unit: 'USD/桶', yAxis: 'y'  },
+  BRENT:    { label: 'Brent原油',    unit: 'USD/桶', yAxis: 'y'  },
+  SC:       { label: '上海原油SC',   unit: 'CNY/桶', yAxis: 'y1' },
+  MURBAN:   { label: 'Murban原油',   unit: 'USD/桶', yAxis: 'y',  reference: true },
+  DME_OMAN: { label: 'DME Oman原油', unit: 'USD/桶', yAxis: 'y',  reference: true },
 }
 
 // 新闻分类配置
@@ -60,23 +68,26 @@ const NEWS_CATEGORIES = [
   { key: 'crude',         label: '原油'   },
   { key: 'official_west', label: '欧美官方' },
   { key: 'official_iran', label: '伊朗官方' },
+  { key: 'official_china',label: '中国官方' },
 ]
 
 // 分类标签样式
 const CATEGORY_BADGE = {
-  conflict:      'bg-rose-100 text-rose-600 dark:bg-rose-900/30 dark:text-rose-400',
-  shipping:      'bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400',
-  crude:         'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400',
-  official_west: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400',
-  official_iran: 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400',
+  conflict:       'bg-rose-100 text-rose-600 dark:bg-rose-900/30 dark:text-rose-400',
+  shipping:       'bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400',
+  crude:          'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400',
+  official_west:  'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400',
+  official_iran:  'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400',
+  official_china: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400',
 }
 
 const CATEGORY_LABEL = {
-  conflict:      '冲突',
-  shipping:      '运输',
-  crude:         '原油',
-  official_west: '欧美官方',
-  official_iran: '伊朗官方',
+  conflict:       '冲突',
+  shipping:       '运输',
+  crude:          '原油',
+  official_west:  '欧美官方',
+  official_iran:  '伊朗官方',
+  official_china: '中国官方',
 }
 
 // priority 颜色指示点
@@ -155,6 +166,17 @@ export default function CrudeOilComparison() {
   // Hormuz 观察
   const [hormuzItems,   setHormuzItems]   = useState([])
   const [hormuzLoading, setHormuzLoading] = useState(false)
+
+  // 多方视角
+  const [perspectives,        setPerspectives]        = useState(null)
+  const [perspectivesLoading, setPerspectivesLoading] = useState(false)
+
+  // AIS 船舶监测
+  const [aisSnapshot,    setAisSnapshot]    = useState(null)
+  const [aisHistory,     setAisHistory]     = useState([])
+  const [aisLoading,     setAisLoading]     = useState(false)
+  const [aisSyncing,     setAisSyncing]     = useState(false)
+  const [aisSyncMsg,     setAisSyncMsg]     = useState('')
 
   // 新闻排序
   const [newsSort, setNewsSort] = useState('time')  // 'time' | 'relevance'
@@ -296,6 +318,69 @@ export default function CrudeOilComparison() {
     return () => ac.abort()
   }, [loadHormuz])
 
+  // 多方视角加载
+  const loadPerspectives = useCallback(async (signal) => {
+    setPerspectivesLoading(true)
+    try {
+      const res = await fetchPerspectives(signal)
+      setPerspectives(res)
+    } catch (e) {
+      if (e.name !== 'AbortError') console.error('perspectives fetch error', e)
+    } finally {
+      setPerspectivesLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    const ac = new AbortController()
+    loadPerspectives(ac.signal)
+    return () => ac.abort()
+  }, [loadPerspectives])
+
+  // AIS 船舶数据加载
+  const loadAis = useCallback(async (signal) => {
+    setAisLoading(true)
+    try {
+      const [cur, hist] = await Promise.all([
+        fetchHormuzCurrent(signal),
+        fetchHormuzHistory(signal),
+      ])
+      setAisSnapshot(cur)
+      setAisHistory(hist.items || [])
+    } catch (e) {
+      if (e.name !== 'AbortError') console.error('AIS fetch error', e)
+    } finally {
+      setAisLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    const ac = new AbortController()
+    loadAis(ac.signal)
+    return () => ac.abort()
+  }, [loadAis])
+
+  async function handleAisSync() {
+    setAisSyncing(true)
+    setAisSyncMsg('')
+    try {
+      const res = await triggerHormuzSync()
+      if (res.ok === false) {
+        setAisSyncMsg(res.message || '采集失败')
+      } else {
+        setAisSyncMsg('AIS 采集已启动，约2分钟后完成')
+        setTimeout(() => {
+          const ac = new AbortController()
+          loadAis(ac.signal)
+        }, 130000)
+      }
+    } catch (e) {
+      setAisSyncMsg(`失败: ${e.message}`)
+    } finally {
+      setAisSyncing(false)
+    }
+  }
+
   async function handleNewsSync() {
     setNewsSyncing(true)
     setNewsSyncMsg('')
@@ -309,6 +394,7 @@ export default function CrudeOilComparison() {
         loadNews(ac.signal)
         loadSummary(ac.signal)
         loadHormuz(ac.signal)
+        loadPerspectives(ac.signal)
       }, 35000)
     } catch (e) {
       setNewsSyncMsg(`失败: ${e.message}`)
@@ -355,8 +441,34 @@ export default function CrudeOilComparison() {
         yAxisID: 'y1',
         spanGaps: true,
       },
+      {
+        label:           SYMBOL_META.MURBAN.label,
+        data:            visibleItems.map(it => it.MURBAN ?? null),
+        borderColor:     SYMBOL_COLORS.MURBAN.border,
+        backgroundColor: SYMBOL_COLORS.MURBAN.background,
+        borderWidth: 1.5,
+        borderDash:      [4, 3],
+        pointRadius: 0,
+        tension: 0.1,
+        yAxisID: 'y',
+        spanGaps: true,
+      },
+      {
+        label:           SYMBOL_META.DME_OMAN.label,
+        data:            visibleItems.map(it => it.DME_OMAN ?? null),
+        borderColor:     SYMBOL_COLORS.DME_OMAN.border,
+        backgroundColor: SYMBOL_COLORS.DME_OMAN.background,
+        borderWidth: 1.5,
+        borderDash:      [4, 3],
+        pointRadius: 0,
+        tension: 0.1,
+        yAxisID: 'y',
+        spanGaps: true,
+      },
     ],
   }
+
+  const _DATASET_SYMS = ['WTI', 'BRENT', 'SC', 'MURBAN', 'DME_OMAN']
 
   const chartOptions = {
     responsive: true,
@@ -365,16 +477,18 @@ export default function CrudeOilComparison() {
       legend: { position: 'top' },
       title: {
         display: true,
-        text: '全球原油价格对比（WTI / Brent / 上海SC）',
+        text: '全球原油价格对比（WTI / Brent / 上海SC / Murban / DME Oman）',
         font: { size: 15 },
       },
       tooltip: {
         callbacks: {
           label(ctx) {
-            const sym   = ['WTI', 'BRENT', 'SC'][ctx.datasetIndex]
-            const unit  = SYMBOL_META[sym].unit
-            const val   = ctx.parsed.y
-            return val == null ? '' : `${ctx.dataset.label}: ${val.toFixed(2)} ${unit}`
+            const sym  = _DATASET_SYMS[ctx.datasetIndex]
+            const meta = SYMBOL_META[sym]
+            const val  = ctx.parsed.y
+            if (val == null) return ''
+            const refTag = meta?.reference ? ' ⚠参考' : ''
+            return `${ctx.dataset.label}: ${val.toFixed(2)} ${meta?.unit || ''}${refTag}`
           },
         },
       },
@@ -597,10 +711,18 @@ export default function CrudeOilComparison() {
         </div>
       )}
 
-      {/* 数据来源注释 */}
+      {/* 数据来源注释 + 时区说明 */}
       <div className="text-xs text-slate-400 space-y-1">
-        <p>数据来源：WTI / Brent — akshare（新浪财经国际期货）；上海SC — akshare（新浪财经，SC888主力连续合约）</p>
-        <p>SC价格为人民币计价（右Y轴），WTI / Brent 为美元计价（左Y轴），单位均为"元/桶"</p>
+        <p>数据来源：WTI / Brent — akshare（新浪财经国际期货）；上海SC — akshare（新浪财经，SC888主力连续合约）；Murban / DME Oman — oilprice.com（参考价，非官方）</p>
+        <p>SC价格为人民币计价（右Y轴），WTI / Brent / Murban / DME Oman 为美元计价（左Y轴），单位均为"元/桶"</p>
+        <p className="flex flex-wrap gap-x-4 gap-y-0.5 mt-1">
+          <span>🕐 <strong>WTI</strong>：NYMEX（纽约，UTC-5/UTC-4）</span>
+          <span>🕐 <strong>Brent</strong>：ICE（伦敦，UTC+0/UTC+1）</span>
+          <span>🕐 <strong>上海SC</strong>：INE（上海，UTC+8）</span>
+          <span>🕐 <strong>Murban</strong>：ICE Abu Dhabi（阿布扎比，UTC+4）</span>
+          <span>🕐 <strong>DME Oman</strong>：DME（迪拜，UTC+4）</span>
+        </p>
+        <p className="text-slate-300 dark:text-slate-600">虚线品种（Murban / DME Oman）为参考价，数据来源为第三方抓取，仅供参考</p>
       </div>
 
       {/* ── 中东冲突与原油新闻 ────────────────────────────────────────────── */}
@@ -872,6 +994,195 @@ export default function CrudeOilComparison() {
             </div>
           ))}
         </div>
+      </div>
+
+      {/* ── AIS 船舶监测 ──────────────────────────────────────────────────── */}
+      <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+          <div>
+            <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">霍尔木兹海峡 AIS 船舶监测</span>
+            <span className="text-xs text-slate-400 ml-2">数据源：AISStream.io · 每30分钟更新</span>
+          </div>
+          <button
+            onClick={handleAisSync}
+            disabled={aisSyncing}
+            className="px-3 py-1.5 bg-slate-700 text-white rounded-lg text-xs font-medium hover:bg-slate-600 disabled:opacity-50 transition-colors"
+          >
+            {aisSyncing ? '采集中…' : '立即采集'}
+          </button>
+        </div>
+
+        {aisSyncMsg && (
+          <div className="text-xs text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded px-3 py-2 mb-3">
+            {aisSyncMsg}
+          </div>
+        )}
+
+        {aisLoading && (
+          <div className="flex items-center gap-2 text-slate-400 text-sm">
+            <span className="material-symbols-outlined animate-spin text-base">progress_activity</span>
+            加载中…
+          </div>
+        )}
+
+        {!aisLoading && aisSnapshot && !aisSnapshot.api_key_configured && (
+          <p className="text-sm text-amber-600 dark:text-amber-400">
+            AISSTREAM_API_KEY 未配置，请在 .env 中设置后重启服务。注册地址：aisstream.io
+          </p>
+        )}
+
+        {!aisLoading && aisSnapshot?.api_key_configured && !aisSnapshot.snapshot && (
+          <p className="text-sm text-slate-400">暂无数据，请点击「立即采集」</p>
+        )}
+
+        {!aisLoading && aisSnapshot?.snapshot && (
+          <div className="space-y-3">
+            {/* 快照统计卡片 */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="bg-slate-50 dark:bg-slate-800 rounded-lg p-3 text-center">
+                <div className="text-2xl font-bold text-slate-800 dark:text-slate-100">
+                  {aisSnapshot.snapshot.vessel_count}
+                </div>
+                <div className="text-xs text-slate-400 mt-0.5">区域内船只</div>
+              </div>
+              <div className="bg-amber-50 dark:bg-amber-900/20 rounded-lg p-3 text-center">
+                <div className="text-2xl font-bold text-amber-700 dark:text-amber-400">
+                  {aisSnapshot.snapshot.tanker_count}
+                </div>
+                <div className="text-xs text-slate-400 mt-0.5">油轮</div>
+              </div>
+              <div className="bg-slate-50 dark:bg-slate-800 rounded-lg p-3 text-center col-span-2">
+                <div className="text-xs text-slate-500 dark:text-slate-400">
+                  快照时间：{aisSnapshot.snapshot.snapshot_at?.slice(0, 16).replace('T', ' ')} UTC
+                </div>
+                <div className="text-xs text-slate-400 mt-1">
+                  数据质量：{aisSnapshot.snapshot.data_quality === 'full' ? '完整' : '部分'}
+                </div>
+              </div>
+            </div>
+
+            {/* 24小时趋势 */}
+            {aisHistory.length > 1 && (
+              <div>
+                <div className="text-xs text-slate-400 mb-1">近24小时趋势（船只数 / 油轮数）</div>
+                <div className="flex items-end gap-0.5 h-12">
+                  {aisHistory.map((snap, i) => {
+                    const maxV = Math.max(...aisHistory.map(s => s.vessel_count || 0), 1)
+                    const h = Math.round(((snap.vessel_count || 0) / maxV) * 100)
+                    const ht = Math.round(((snap.tanker_count || 0) / maxV) * 100)
+                    return (
+                      <div key={i} className="flex-1 flex items-end gap-px" title={`${snap.snapshot_at?.slice(11,16)} — 船只:${snap.vessel_count} 油轮:${snap.tanker_count}`}>
+                        <div className="flex-1 bg-slate-300 dark:bg-slate-600 rounded-t" style={{ height: `${h}%` }} />
+                        <div className="flex-1 bg-amber-400 dark:bg-amber-500 rounded-t" style={{ height: `${ht}%` }} />
+                      </div>
+                    )
+                  })}
+                </div>
+                <div className="flex items-center gap-3 mt-1 text-[10px] text-slate-400">
+                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded bg-slate-300 dark:bg-slate-600 inline-block" />船只</span>
+                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded bg-amber-400 inline-block" />油轮</span>
+                </div>
+              </div>
+            )}
+
+            {/* 船只列表（最多显示10条） */}
+            {aisSnapshot.vessels?.length > 0 && (
+              <div>
+                <div className="text-xs text-slate-400 mb-1">当前区域船只（前10条）</div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="bg-slate-50 dark:bg-slate-800 text-slate-500">
+                        <th className="px-2 py-1 text-left">船名</th>
+                        <th className="px-2 py-1 text-left">类型</th>
+                        <th className="px-2 py-1 text-right">速度(kn)</th>
+                        <th className="px-2 py-1 text-right">纬度</th>
+                        <th className="px-2 py-1 text-right">经度</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {aisSnapshot.vessels.slice(0, 10).map(v => (
+                        <tr key={v.mmsi} className="border-t border-slate-100 dark:border-slate-800">
+                          <td className="px-2 py-1 font-medium">{v.ship_name || v.mmsi}</td>
+                          <td className="px-2 py-1">
+                            {v.vessel_type >= 80 && v.vessel_type <= 89
+                              ? <span className="text-amber-600 font-medium">油轮</span>
+                              : v.vessel_type ?? '—'}
+                          </td>
+                          <td className="px-2 py-1 text-right font-mono">{v.speed?.toFixed(1) ?? '—'}</td>
+                          <td className="px-2 py-1 text-right font-mono">{v.lat?.toFixed(3) ?? '—'}</td>
+                          <td className="px-2 py-1 text-right font-mono">{v.lon?.toFixed(3) ?? '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {aisSnapshot.vessels.length > 10 && (
+                  <p className="text-xs text-slate-400 mt-1">…共 {aisSnapshot.vessels.length} 艘</p>
+                )}
+              </div>
+            )}
+
+            <p className="text-[10px] text-slate-300 dark:text-slate-600">{aisSnapshot.note}</p>
+          </div>
+        )}
+      </div>
+
+      {/* ── 多方视角对比 ──────────────────────────────────────────────────── */}
+      <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm p-4">
+        <div className="mb-3">
+          <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">多方视角对比</span>
+          <span className="text-xs text-slate-400 ml-2">欧美官方 / 中国官方 / 伊朗官方 — 最近7天各取3条</span>
+        </div>
+
+        {perspectivesLoading && (
+          <div className="flex items-center gap-2 text-slate-400 text-sm">
+            <span className="material-symbols-outlined animate-spin text-base">progress_activity</span>
+            加载中…
+          </div>
+        )}
+
+        {!perspectivesLoading && perspectives && (
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {[
+              { key: 'west',  label: '欧美官方', badge: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400' },
+              { key: 'china', label: '中国官方', badge: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' },
+              { key: 'iran',  label: '伊朗官方', badge: 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400' },
+            ].map(({ key, label, badge }) => (
+              <div key={key} className="space-y-2">
+                <span className={`inline-block text-[11px] px-2 py-0.5 rounded font-medium ${badge}`}>{label}</span>
+                {(perspectives[key] || []).length === 0 ? (
+                  <p className="text-xs text-slate-400">最近7天暂无相关新闻</p>
+                ) : (
+                  (perspectives[key] || []).map(item => (
+                    <div key={item.id} className="flex items-start gap-1.5">
+                      <span className={`mt-1.5 shrink-0 w-1.5 h-1.5 rounded-full ${priorityDot(item.priority)}`} />
+                      <div className="min-w-0">
+                        <a
+                          href={item.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          title={item.title_zh ? item.title : undefined}
+                          className="text-xs text-slate-800 dark:text-slate-100 hover:text-primary leading-snug line-clamp-2"
+                        >
+                          {item.title_zh || item.title}
+                        </a>
+                        <div className="text-[10px] text-slate-400 mt-0.5">
+                          {item.source_name}
+                          {item.published_at && <span className="ml-1">{item.published_at.slice(0, 10)}</span>}
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {!perspectivesLoading && !perspectives && (
+          <p className="text-sm text-slate-400">请先点击「抓取新闻」加载数据</p>
+        )}
       </div>
 
     </div>

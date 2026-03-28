@@ -36,15 +36,16 @@ news_router = APIRouter(prefix="/api/news", tags=["news"])
 _news_sync_lock = threading.Lock()
 
 # 合法的 category 值
-VALID_CATEGORIES = {"conflict", "shipping", "crude", "official_west", "official_iran"}
+VALID_CATEGORIES = {"conflict", "shipping", "crude", "official_west", "official_iran", "official_china"}
 
 # 分类中文名（用于 focus_text 生成）
 _CATEGORY_ZH = {
-    "conflict":      "冲突动态",
-    "shipping":      "航运运输",
-    "crude":         "原油市场",
-    "official_west": "欧美官方",
-    "official_iran": "伊朗官方",
+    "conflict":       "冲突动态",
+    "shipping":       "航运运输",
+    "crude":          "原油市场",
+    "official_west":  "欧美官方",
+    "official_iran":  "伊朗官方",
+    "official_china": "中国官方",
 }
 
 
@@ -53,14 +54,17 @@ _CATEGORY_ZH = {
 # ---------------------------------------------------------------------------
 
 def _get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
 
 
 def _get_sync_key(key: str) -> str:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     try:
+        conn.execute("PRAGMA journal_mode=WAL")
         row = conn.execute("SELECT value FROM sync_state WHERE key=?", (key,)).fetchone()
         return row[0] if row else ""
     finally:
@@ -68,8 +72,9 @@ def _get_sync_key(key: str) -> str:
 
 
 def _set_sync_key(key: str, value: str):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     try:
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(
             "INSERT OR REPLACE INTO sync_state(key, value) VALUES(?, ?)",
             (key, value),
@@ -80,8 +85,9 @@ def _set_sync_key(key: str, value: str):
 
 
 def _ensure_table():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     try:
+        conn.execute("PRAGMA journal_mode=WAL")
         init_news_db(conn)
     finally:
         conn.close()
@@ -401,5 +407,49 @@ def get_hormuz_news(
             params + [limit],
         ).fetchall()
         return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# GET /api/news/perspectives  — 多方视角对比
+# ---------------------------------------------------------------------------
+
+@news_router.get("/perspectives", summary="多方视角对比（欧美/中国/伊朗官方，各取最近3条）")
+def get_news_perspectives():
+    """
+    返回三方官方立场新闻，各取最近7天内优先级最高的3条。
+
+    响应格式：
+    {
+      "west":  [{ "id", "title", "title_zh", "url", "source_name", "published_at", "priority" }, ...],
+      "china": [...],
+      "iran":  [...]
+    }
+    """
+    _ensure_table()
+    conn = _get_db()
+    try:
+        now = datetime.now(timezone.utc)
+        cutoff = (now - timedelta(days=7)).isoformat()
+
+        def _fetch(cat: str) -> list:
+            rows = conn.execute(
+                """
+                SELECT id, title, title_zh, url, source_name, published_at, priority
+                FROM crude_news
+                WHERE category = ? AND COALESCE(published_at, fetched_at) >= ?
+                ORDER BY priority ASC, published_at DESC
+                LIMIT 3
+                """,
+                (cat, cutoff),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+        return {
+            "west":  _fetch("official_west"),
+            "china": _fetch("official_china"),
+            "iran":  _fetch("official_iran"),
+        }
     finally:
         conn.close()

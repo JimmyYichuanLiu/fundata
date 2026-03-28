@@ -3,19 +3,28 @@
 """
 原油价格数据抓取模块 — 独立于 get_market_data.py
 
-覆盖三个基准品种：
-  WTI   — NYMEX 西德克萨斯中质原油，单位 USD/桶，via akshare futures_foreign_hist("CL")
-  BRENT — ICE 布伦特原油，单位 USD/桶，via akshare futures_foreign_hist("OIL")
-  SC    — 上海国际能源交易中心原油主力连续合约（SC888），单位 CNY/桶，via akshare futures_zh_daily_sina("SC888")
+覆盖五个品种：
+  WTI     — NYMEX 西德克萨斯中质原油，单位 USD/桶，via akshare futures_foreign_hist("CL")
+  BRENT   — ICE 布伦特原油，单位 USD/桶，via akshare futures_foreign_hist("OIL")
+  SC      — 上海国际能源交易中心原油主力连续合约（SC0），单位 CNY/桶，via akshare futures_zh_daily_sina("SC0")
+  MURBAN  — 阿布扎比轻质原油（ICE IFAD），单位 USD/桶，via oilprice.com 爬取（备用：Google News EIA RSS）
+  DME_OMAN— 迪拜商品交易所阿曼原油，单位 USD/桶，via oilprice.com 爬取（备用：Google News EIA RSS）
+
+data_source 字段：
+  "akshare"      — akshare 官方数据（WTI/BRENT/SC）
+  "scrape"       — oilprice.com 爬取（MURBAN/DME_OMAN 主数据源）
+  "news_estimate"— Google News 新闻标题中提取的价格估算（仅供参考，is_reference=1）
 
 数据库表：crude_daily（写入 fund_data.db，与现有表共存）
 """
 
 import logging
 import os
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta
+from urllib.parse import quote_plus
 
 from dotenv import load_dotenv
 
@@ -34,22 +43,41 @@ DB_PATH: str = os.getenv("DB_PATH", "fund_data.db")
 # ---------------------------------------------------------------------------
 CRUDE_SYMBOLS = {
     "WTI": {
-        "fetch": "foreign",       # 使用 ak.futures_foreign_hist
+        "fetch": "foreign",
         "ak_symbol": "CL",
         "currency": "USD",
         "description": "WTI原油 (NYMEX)",
+        "exchange_tz": "纽约时间 UTC-5/-4",
     },
     "BRENT": {
-        "fetch": "foreign",       # 使用 ak.futures_foreign_hist
+        "fetch": "foreign",
         "ak_symbol": "OIL",
         "currency": "USD",
         "description": "布伦特原油 (ICE)",
+        "exchange_tz": "伦敦时间 UTC+0",
     },
     "SC": {
-        "fetch": "domestic",      # 使用 ak.futures_zh_daily_sina
-        "ak_symbol": "SC0",       # SC0 = 主力合约（SC888在新版akshare中已不可用）
+        "fetch": "domestic",
+        "ak_symbol": "SC0",
         "currency": "CNY",
         "description": "上海原油 (INE SC0主力合约)",
+        "exchange_tz": "上海时间 UTC+8",
+    },
+    "MURBAN": {
+        "fetch": "scrape",
+        "oilprice_page_id": "4464",   # oilprice.com/oil-price-charts/4464
+        "news_query": "Murban crude oil price",
+        "currency": "USD",
+        "description": "Murban原油 (ICE IFAD，阿布扎比)",
+        "exchange_tz": "阿布扎比时间 UTC+4",
+    },
+    "DME_OMAN": {
+        "fetch": "scrape",
+        "oilprice_page_id": "48",     # oilprice.com/oil-price-charts/48
+        "news_query": "DME Oman crude oil price",
+        "currency": "USD",
+        "description": "DME阿曼原油 (Dubai Mercantile Exchange)",
+        "exchange_tz": "迪拜时间 UTC+4",
     },
 }
 
@@ -70,15 +98,17 @@ def init_crude_db(conn: sqlite3.Connection):
     """创建 crude_daily 表（若不存在）和 sync_state 所需 key。"""
     conn.execute("""
         CREATE TABLE IF NOT EXISTS crude_daily (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts_code    TEXT    NOT NULL,
-            trade_date TEXT    NOT NULL,
-            open       REAL,
-            high       REAL,
-            low        REAL,
-            close      REAL    NOT NULL,
-            volume     REAL,
-            currency   TEXT    NOT NULL DEFAULT 'USD',
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_code      TEXT    NOT NULL,
+            trade_date   TEXT    NOT NULL,
+            open         REAL,
+            high         REAL,
+            low          REAL,
+            close        REAL    NOT NULL,
+            volume       REAL,
+            currency     TEXT    NOT NULL DEFAULT 'USD',
+            data_source  TEXT    NOT NULL DEFAULT 'akshare',
+            is_reference INTEGER NOT NULL DEFAULT 0,
             UNIQUE(ts_code, trade_date)
         )
     """)
@@ -86,6 +116,15 @@ def init_crude_db(conn: sqlite3.Connection):
         CREATE INDEX IF NOT EXISTS idx_crude_daily_code_date
         ON crude_daily(ts_code, trade_date)
     """)
+    # 向后兼容：旧库中缺失的列
+    for col_def in [
+        "ALTER TABLE crude_daily ADD COLUMN data_source TEXT NOT NULL DEFAULT 'akshare'",
+        "ALTER TABLE crude_daily ADD COLUMN is_reference INTEGER NOT NULL DEFAULT 0",
+    ]:
+        try:
+            conn.execute(col_def)
+        except Exception:
+            pass
     conn.commit()
     logger.info("crude_daily 表初始化完毕")
 
@@ -302,6 +341,161 @@ def _sync_sc(conn: sqlite3.Connection) -> int:
 
 
 # ---------------------------------------------------------------------------
+# MURBAN / DME_OMAN — oilprice.com 爬取（主数据源）
+# ---------------------------------------------------------------------------
+
+def _fetch_oilprice_scrape(ts_code: str, page_id: str) -> tuple[str | None, float | None]:
+    """
+    从 oilprice.com/oil-price-charts/{page_id} 爬取当日价格。
+    返回 (trade_date: YYYYMMDD, close: float) 或 (None, None) 表示失败。
+    失败时静默，不抛异常。
+    """
+    try:
+        import requests
+        from bs4 import BeautifulSoup
+    except ImportError:
+        logger.warning("[scrape] requests 或 beautifulsoup4 未安装，跳过 oilprice.com 爬取")
+        return None, None
+
+    url = f"https://oilprice.com/oil-price-charts/{page_id}"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+    except Exception as e:
+        logger.warning("[%s] oilprice.com 请求失败: %s", ts_code, e)
+        return None, None
+
+    try:
+        soup = BeautifulSoup(resp.text, "html.parser")
+        price_val = None
+
+        # oilprice.com 价格在 <td class="last_price" data-price="XX.XX"> 中
+        el = soup.select_one(f'tr[data-id="{page_id}"] td.last_price')
+        if el:
+            # 优先取 data-price 属性，更精确
+            raw = el.get("data-price") or el.get_text(strip=True)
+            raw = raw.replace(",", "")
+            m = re.search(r"(\d+\.?\d*)", raw)
+            if m:
+                price_val = float(m.group(1))
+
+        if price_val is None:
+            logger.warning("[%s] oilprice.com 未找到价格元素，页面结构可能已变化", ts_code)
+            return None, None
+
+        trade_date = datetime.now().strftime("%Y%m%d")
+        logger.info("[%s] oilprice.com 爬取成功: %s = %.2f", ts_code, trade_date, price_val)
+        return trade_date, price_val
+
+    except Exception as e:
+        logger.warning("[%s] oilprice.com 解析失败: %s", ts_code, e)
+        return None, None
+
+
+# ---------------------------------------------------------------------------
+# MURBAN / DME_OMAN — Google News EIA RSS 备用估算
+# ---------------------------------------------------------------------------
+
+def _fetch_news_price_estimate(ts_code: str, query: str) -> tuple[str | None, float | None]:
+    """
+    从 Google News RSS 搜索标题中用正则提取价格数字作为估算值。
+    返回 (trade_date: YYYYMMDD, close: float) 或 (None, None)。
+    标注 is_reference=1，仅供参考。
+    """
+    try:
+        import feedparser
+    except ImportError:
+        logger.warning("[news_estimate] feedparser 未安装，跳过新闻价格估算")
+        return None, None
+
+    encoded = quote_plus(f"({query}) when:2d")
+    rss_url = f"https://news.google.com/rss/search?q={encoded}&hl=en-US&gl=US&ceid=US:en"
+
+    try:
+        parsed = feedparser.parse(rss_url, request_headers={"User-Agent": "Mozilla/5.0"})
+    except Exception as e:
+        logger.warning("[%s] Google News RSS 请求失败: %s", ts_code, e)
+        return None, None
+
+    entries = parsed.get("entries", [])
+    # 在标题中搜索 "$XX.XX" 或 "XX.XX USD" 格式的价格
+    price_pattern = re.compile(r"\$\s*(\d{2,3}(?:\.\d{1,2})?)")
+    for entry in entries[:10]:
+        title = entry.get("title", "")
+        m = price_pattern.search(title)
+        if m:
+            price_val = float(m.group(1))
+            # 合理性检查：原油价格通常在 $20-$200 之间
+            if 20 <= price_val <= 200:
+                trade_date = datetime.now().strftime("%Y%m%d")
+                logger.info("[%s] 新闻估算价格: %s = %.2f（仅供参考）来源: %s",
+                            ts_code, trade_date, price_val, title[:60])
+                return trade_date, price_val
+
+    logger.info("[%s] 新闻标题中未找到有效价格", ts_code)
+    return None, None
+
+
+# ---------------------------------------------------------------------------
+# MURBAN / DME_OMAN 主同步函数
+# ---------------------------------------------------------------------------
+
+def _sync_scrape(conn: sqlite3.Connection, ts_code: str, cfg: dict) -> int:
+    """
+    先尝试 oilprice.com 爬取，失败则降级到 Google News 估算。
+    返回新增行数（0 或 1）。
+    """
+    currency = cfg["currency"]
+    page_id = cfg.get("oilprice_page_id")
+    news_query = cfg.get("news_query", ts_code)
+
+    trade_date, close_val = None, None
+    data_source = "scrape"
+    is_reference = 0
+
+    # 主数据源：oilprice.com
+    if page_id:
+        trade_date, close_val = _fetch_oilprice_scrape(ts_code, page_id)
+
+    # 备用：Google News 估算
+    if close_val is None:
+        logger.info("[%s] oilprice.com 失败，降级到新闻估算", ts_code)
+        trade_date, close_val = _fetch_news_price_estimate(ts_code, news_query)
+        data_source = "news_estimate"
+        is_reference = 1
+
+    if close_val is None:
+        logger.warning("[%s] 所有数据源均失败，跳过", ts_code)
+        return 0
+
+    try:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO crude_daily
+                (ts_code, trade_date, close, currency, data_source, is_reference)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (ts_code, trade_date, close_val, currency, data_source, is_reference),
+        )
+        conn.commit()
+        added = conn.execute("SELECT changes()").fetchone()[0]
+        if added:
+            logger.info("[%s] 写入 %s = %.2f (%s)", ts_code, trade_date, close_val, data_source)
+        return added
+    except Exception as e:
+        logger.warning("[%s] 写入失败: %s", ts_code, e)
+        return 0
+
+
+# ---------------------------------------------------------------------------
 # 交叉验证：yfinance vs akshare
 # ---------------------------------------------------------------------------
 
@@ -419,8 +613,12 @@ def connect_and_fetch_crude(db_path: str = DB_PATH):
             try:
                 if cfg["fetch"] == "foreign":
                     added = _sync_foreign(conn, ts_code, cfg["ak_symbol"], cfg["currency"])
-                else:
+                elif cfg["fetch"] == "domestic":
                     added = _sync_sc(conn)
+                elif cfg["fetch"] == "scrape":
+                    added = _sync_scrape(conn, ts_code, cfg)
+                else:
+                    added = 0
                 total_added += added
             except Exception as e:
                 msg = f"[{ts_code}] 同步失败: {e}"

@@ -152,3 +152,42 @@ export async function fetchNewsSources(signal) {
 export async function fetchHormuzNews(limit = 10, signal) {
   return apiFetch(`/api/news/hormuz?limit=${limit}`, signal)
 }
+
+/**
+ * 获取多方视角对比（欧美官方 / 中国官方 / 伊朗官方，各取最近3条）
+ * @param {AbortSignal} signal
+ * @returns {{ west: Array, china: Array, iran: Array }}
+ */
+export async function fetchPerspectives(signal) {
+  return apiFetch('/api/news/perspectives', signal)
+}
+
+/**
+ * 获取霍尔木兹海峡 AIS 船舶当前快照
+ * @param {AbortSignal} signal
+ * @returns {{ snapshot, vessels, api_key_configured, note }}
+ */
+export async function fetchHormuzCurrent(signal) {
+  return apiFetch('/api/hormuz/current', signal)
+}
+
+/**
+ * 获取霍尔木兹海峡 AIS 近24条快照趋势
+ * @param {AbortSignal} signal
+ * @returns {{ items: Array }}
+ */
+export async function fetchHormuzHistory(signal) {
+  return apiFetch('/api/hormuz/history', signal)
+}
+
+/**
+ * 手动触发 AIS 采集
+ */
+export async function triggerHormuzSync() {
+  const res = await fetch('/api/hormuz/trigger', { method: 'POST' })
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}))
+    throw new Error(body.detail || `HTTP ${res.status}`)
+  }
+  return res.json()
+}
