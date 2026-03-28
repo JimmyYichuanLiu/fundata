@@ -33,13 +33,6 @@ const CATEGORY_LABEL = {
   official_iran:  '伊朗官方',
   official_china: '中国官方',
 }
-  conflict:       '冲突',
-  shipping:       '运输',
-  crude:          '原油',
-  official_west:  '欧美官方',
-  official_iran:  '伊朗官方',
-  official_china: '中国官方',
-}
 
 function priorityDot(priority) {
   if (priority <= 2) return 'bg-red-500'

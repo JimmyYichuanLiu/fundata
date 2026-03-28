@@ -513,7 +513,7 @@ def init_fx_db(conn: sqlite3.Connection):
     conn.commit()
 
 
-def _sync_usdcny_yfinance(conn: sqlite3.Connection, lookback_days: int = 90) -> int:
+def _sync_usdcny_yfinance(conn: sqlite3.Connection, lookback_days: int = 400) -> int:
     """用 yfinance 拉取 USDCNY=X 历史汇率（境外/有代理环境）。"""
     try:
         import yfinance as yf
@@ -563,7 +563,7 @@ def _sync_usdcny_yfinance(conn: sqlite3.Connection, lookback_days: int = 90) -> 
     return added
 
 
-def _sync_usdcny_sina_hist(conn: sqlite3.Connection, lookback_days: int = 90) -> int:
+def _sync_usdcny_sina_hist(conn: sqlite3.Connection, lookback_days: int = 400) -> int:
     """
     从 Sina Finance 获取 USD/CNY 历史日频汇率（中国境内可访问）。
     API: quotes.sina.cn/cn/api/json_v2.php/CN_MarketDataService.getKLineData
@@ -659,7 +659,7 @@ def _sync_usdcny_sina_realtime(conn: sqlite3.Connection) -> int:
         return 0
 
 
-def _sync_usdcny(conn: sqlite3.Connection, lookback_days: int = 90) -> int:
+def _sync_usdcny(conn: sqlite3.Connection, lookback_days: int = 400) -> int:
     """
     同步 USD/CNY 汇率到 fx_daily 表。
     优先 yfinance（境外/代理），失败时降级至 Sina Finance（中国境内可访问）。
