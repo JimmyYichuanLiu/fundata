@@ -102,6 +102,7 @@ export async function fetchCrudeNews(opts = {}, signal) {
   if (opts.limit  != null) params.set('limit',  opts.limit)
   if (opts.offset != null) params.set('offset', opts.offset)
   if (opts.sort)           params.set('sort',   opts.sort)
+  if (opts.q)              params.set('q',      opts.q)
   const qs = params.toString()
   return apiFetch(`/api/news${qs ? '?' + qs : ''}`, signal)
 }

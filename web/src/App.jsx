@@ -7,6 +7,7 @@ import FundComparison from './pages/FundComparison.jsx'
 import BasisAnalysis from './pages/BasisAnalysis.jsx'
 import CrudeOilComparison from './pages/CrudeOilComparison.jsx'
 import CrudeDataTable from './pages/CrudeDataTable.jsx'
+import NewsPage from './pages/NewsPage.jsx'
 
 export default function App() {
   return (
@@ -20,6 +21,7 @@ export default function App() {
           <Route path="/basis" element={<BasisAnalysis />} />
           <Route path="/crude" element={<CrudeOilComparison />} />
           <Route path="/crude/data" element={<CrudeDataTable />} />
+          <Route path="/news" element={<NewsPage />} />
         </Routes>
       </Layout>
     </BrowserRouter>

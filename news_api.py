@@ -302,11 +302,15 @@ def get_news_summary():
 def list_news(
     category: Optional[str] = Query(
         None,
-        description="category 过滤：conflict / shipping / crude / official_west / official_iran，不传则全部",
+        description="category 过滤：conflict / shipping / crude / official_west / official_iran / official_china，不传则全部",
     ),
     sort:     str            = Query(
         "time",
         description="排序方式：time=最新时间优先，relevance=相关度（priority）优先",
+    ),
+    q:        Optional[str]  = Query(
+        None,
+        description="关键词搜索（同时匹配 title 和 title_zh，中英文均可）",
     ),
     limit:    int            = Query(50, ge=1, le=200),
     offset:   int            = Query(0,  ge=0),
@@ -340,6 +344,9 @@ def list_news(
         if category in VALID_CATEGORIES:
             conditions.append("category = ?")
             params.append(category)
+        if q:
+            conditions.append("(title LIKE ? OR COALESCE(title_zh,'') LIKE ?)")
+            params.extend([f"%{q}%", f"%{q}%"])
 
         where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
@@ -415,41 +422,53 @@ def get_hormuz_news(
 # GET /api/news/perspectives  — 多方视角对比
 # ---------------------------------------------------------------------------
 
-@news_router.get("/perspectives", summary="多方视角对比（欧美/中国/伊朗官方，各取最近3条）")
+@news_router.get("/perspectives", summary="多方视角对比（欧美/中国/伊朗官方，各取24小时内相关度最高5条）")
 def get_news_perspectives():
     """
-    返回三方官方立场新闻，各取最近7天内优先级最高的3条。
+    返回三方官方立场新闻，各取最近24小时内按相关度（priority ASC）排列的前5条。
+    无24小时数据时回退到7天。
 
     响应格式：
     {
       "west":  [{ "id", "title", "title_zh", "url", "source_name", "published_at", "priority" }, ...],
       "china": [...],
-      "iran":  [...]
+      "iran":  [...],
+      "window": "24h"   // 或 "7d"（回退时）
     }
     """
     _ensure_table()
     conn = _get_db()
     try:
         now = datetime.now(timezone.utc)
-        cutoff = (now - timedelta(days=7)).isoformat()
+        cutoff_24h = (now - timedelta(hours=24)).isoformat()
+        cutoff_7d  = (now - timedelta(days=7)).isoformat()
 
-        def _fetch(cat: str) -> list:
+        def _fetch(cat: str, cutoff: str) -> list:
             rows = conn.execute(
                 """
                 SELECT id, title, title_zh, url, source_name, published_at, priority
                 FROM crude_news
                 WHERE category = ? AND COALESCE(published_at, fetched_at) >= ?
                 ORDER BY priority ASC, published_at DESC
-                LIMIT 3
+                LIMIT 5
                 """,
                 (cat, cutoff),
             ).fetchall()
             return [dict(r) for r in rows]
 
+        # 先尝试24小时，若三方均无数据则回退7天
+        west_24h  = _fetch("official_west",  cutoff_24h)
+        china_24h = _fetch("official_china", cutoff_24h)
+        iran_24h  = _fetch("official_iran",  cutoff_24h)
+
+        if west_24h or china_24h or iran_24h:
+            return {"west": west_24h, "china": china_24h, "iran": iran_24h, "window": "24h"}
+
         return {
-            "west":  _fetch("official_west"),
-            "china": _fetch("official_china"),
-            "iran":  _fetch("official_iran"),
+            "west":   _fetch("official_west",  cutoff_7d),
+            "china":  _fetch("official_china", cutoff_7d),
+            "iran":   _fetch("official_iran",  cutoff_7d),
+            "window": "7d",
         }
     finally:
         conn.close()

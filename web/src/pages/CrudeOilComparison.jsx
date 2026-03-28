@@ -907,88 +907,15 @@ export default function CrudeOilComparison() {
           )}
         </div>
 
-        {/* 分类筛选按钮 + 排序切换 */}
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex flex-wrap items-center gap-2">
-            {NEWS_CATEGORIES.map(({ key, label }) => (
-              <button
-                key={key}
-                onClick={() => setNewsCategory(key)}
-                className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-                  newsCategory === key
-                    ? 'bg-primary text-white'
-                    : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-          {/* 排序方式 */}
-          <div className="flex items-center gap-1">
-            <span className="text-xs text-slate-400 mr-1">排序：</span>
-            {[['time', '最新时间'], ['relevance', '相关度']].map(([key, label]) => (
-              <button
-                key={key}
-                onClick={() => setNewsSort(key)}
-                className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
-                  newsSort === key
-                    ? 'bg-slate-700 text-white'
-                    : 'bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* 新闻列表 */}
-        <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm divide-y divide-slate-100 dark:divide-slate-800">
-          {newsLoading && (
-            <div className="flex items-center justify-center h-32 text-slate-400 text-sm gap-2">
-              <span className="material-symbols-outlined animate-spin text-lg">progress_activity</span>
-              加载中…
-            </div>
-          )}
-
-          {!newsLoading && newsItems.length === 0 && (
-            <div className="flex flex-col items-center justify-center h-32 text-slate-400 text-sm gap-2">
-              <span className="material-symbols-outlined text-3xl">newspaper</span>
-              <span>暂无新闻，请点击「抓取新闻」</span>
-            </div>
-          )}
-
-          {!newsLoading && newsItems.map(item => (
-            <div key={item.id} className="px-4 py-3 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex items-start gap-2 flex-1 min-w-0">
-                  {/* 优先度颜色点 */}
-                  <span className={`mt-1.5 shrink-0 w-2 h-2 rounded-full ${priorityDot(item.priority ?? 5)}`} />
-                  <a
-                    href={item.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    title={item.title_zh ? item.title : undefined}
-                    className="text-sm font-medium text-slate-800 dark:text-slate-100 hover:text-primary leading-snug"
-                  >
-                    {item.title_zh || item.title}
-                  </a>
-                </div>
-                <span className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded font-medium ${
-                  CATEGORY_BADGE[item.category] || 'bg-slate-100 text-slate-500'
-                }`}>
-                  {CATEGORY_LABEL[item.category] || item.category}
-                </span>
-              </div>
-              <div className="flex items-center gap-3 mt-1.5 ml-4 text-xs text-slate-400">
-                <span>{item.source_name}</span>
-                {item.published_at && (
-                  <span>{item.published_at.slice(0, 16).replace('T', ' ')}</span>
-                )}
-              </div>
-            </div>
-          ))}
+        {/* 全部新闻入口 */}
+        <div className="flex justify-end">
+          <a
+            href="/news"
+            className="flex items-center gap-1.5 px-4 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-lg text-sm font-medium transition-colors"
+          >
+            <span className="material-symbols-outlined text-base">newspaper</span>
+            查看全部新闻
+          </a>
         </div>
       </div>
 
@@ -1028,7 +955,10 @@ export default function CrudeOilComparison() {
         )}
 
         {!aisLoading && aisSnapshot?.api_key_configured && !aisSnapshot.snapshot && (
-          <p className="text-sm text-slate-400">暂无数据，请点击「立即采集」</p>
+          <p className="text-sm text-red-500 font-medium flex items-center gap-1.5">
+            <span className="material-symbols-outlined text-base">warning</span>
+            数据缺失，尝试更新中 — 请点击「立即采集」或等待定时任务
+          </p>
         )}
 
         {!aisLoading && aisSnapshot?.snapshot && (
@@ -1126,9 +1056,18 @@ export default function CrudeOilComparison() {
 
       {/* ── 多方视角对比 ──────────────────────────────────────────────────── */}
       <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm p-4">
-        <div className="mb-3">
+        <div className="mb-3 flex items-center gap-2 flex-wrap">
           <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">多方视角对比</span>
-          <span className="text-xs text-slate-400 ml-2">欧美官方 / 中国官方 / 伊朗官方 — 最近7天各取3条</span>
+          <span className="text-xs text-slate-400">欧美官方 / 中国官方 / 伊朗官方 — 按相关度各取最高5条</span>
+          {perspectives?.window && (
+            <span className={`text-[11px] px-1.5 py-0.5 rounded font-medium ${
+              perspectives.window === '24h'
+                ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400'
+                : 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
+            }`}>
+              {perspectives.window === '24h' ? '过去24小时' : '回退至7天'}
+            </span>
+          )}
         </div>
 
         {perspectivesLoading && (
@@ -1148,7 +1087,9 @@ export default function CrudeOilComparison() {
               <div key={key} className="space-y-2">
                 <span className={`inline-block text-[11px] px-2 py-0.5 rounded font-medium ${badge}`}>{label}</span>
                 {(perspectives[key] || []).length === 0 ? (
-                  <p className="text-xs text-slate-400">最近7天暂无相关新闻</p>
+                  <p className="text-xs text-slate-400">
+                    {perspectives?.window === '24h' ? '过去24小时暂无相关新闻' : '近7天暂无相关新闻'}
+                  </p>
                 ) : (
                   (perspectives[key] || []).map(item => (
                     <div key={item.id} className="flex items-start gap-1.5">

@@ -425,24 +425,15 @@ def _fetch_feed(conn: sqlite3.Connection, feed_cfg: dict) -> Tuple[int, str]:
             )
             if conn.execute("SELECT changes()").fetchone()[0] > 0:
                 added += 1
-                # 中文源：检测是否含CJK字符，含则直接存title_zh，否则仍走翻译
-                if is_chinese:
-                    if _has_cjk(title):
-                        conn.execute(
-                            "UPDATE crude_news SET title_zh = ? WHERE url = ?",
-                            (title, link),
-                        )
-                    elif priority <= TRANSLATE_PRIORITY_THRESHOLD:
-                        title_zh = _translate_to_zh(title)
-                        if title_zh is not None:
-                            conn.execute(
-                                "UPDATE crude_news SET title_zh = ? WHERE url = ?",
-                                (title_zh, link),
-                            )
-                # 英文源：仅翻译高优先级新闻（priority <= 阈值），控制 HTTP 请求量
+                # 所有来源统一规则：含CJK字符直接存title_zh；否则按priority翻译
+                if _has_cjk(title):
+                    conn.execute(
+                        "UPDATE crude_news SET title_zh = ? WHERE url = ?",
+                        (title, link),
+                    )
                 elif priority <= TRANSLATE_PRIORITY_THRESHOLD:
                     title_zh = _translate_to_zh(title)
-                    if title_zh is not None:  # None 表示依赖未安装，不写入
+                    if title_zh is not None:
                         conn.execute(
                             "UPDATE crude_news SET title_zh = ? WHERE url = ?",
                             (title_zh, link),
