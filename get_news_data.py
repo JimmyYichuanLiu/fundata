@@ -3,22 +3,29 @@
 """
 原油与中东冲突新闻 RSS 抓取模块
 
-数据源（14个，免费、无需 token）：
+数据源（21个，免费、无需 token）：
   - USNI News          https://news.usni.org/feed               — 美海军/霍尔木兹专项
   - OilPrice.com       https://oilprice.com/rss/main            — 原油市场（全量收录）
   - Al Jazeera         https://www.aljazeera.com/xml/rss/all.xml — 中东冲突（关键词过滤）
-  - IAEA               https://www.iaea.org/feeds/topnews       — 国际原子能机构（全量）
-  - White House        Google News RSS site:whitehouse.gov       — 美国官方立场（关键词过滤）
-  - State Dept         Google News RSS site:state.gov           — 国务院声明（关键词过滤）
-  - Press TV           Google News RSS site:presstv.ir          — 伊朗国家电视台（全量）
-  - IRNA               Google News RSS site:irna.ir             — 伊朗官方通讯社（全量）
-  - Tasnim News        Google News RSS site:tasnimnews.com      — 伊朗半官方通讯社（全量）
-  - 新华社             Google News 中文 RSS                     — 中国官方（中文直接存储）
-  - 中国日报           Google News 中文 RSS                     — 中国官方（中文直接存储）
-  - 环球时报           Google News 中文 RSS                     — 中国官方（中文直接存储）
-  - CGTN               Google News 中文 RSS                     — 中国官方（中文直接存储）
-  - The National       Google News RSS site:thenationalnews.com — 阿联酋视角（关键词过滤）
-  - Reuters Energy     Google News RSS site:reuters.com         — 路透能源（关键词过滤）
+  - IAEA               https://www.iaea.org/feeds/topnews       — 国际原子能机构
+  - White House        Google News RSS site:whitehouse.gov       — 美国白宫
+  - State Dept         Google News RSS site:state.gov           — 美国国务院
+  - Pentagon           Google News RSS site:defense.gov         — 美国国防部
+  - Treasury Dept      Google News RSS site:treasury.gov        — 美国财政部
+  - UN News            https://news.un.org/feed/subscribe/en/news/all/rss.xml — 联合国
+  - Federal Reserve    https://www.federalreserve.gov/feeds/press_all.xml — 美联储
+  - EIA                Google News RSS site:eia.gov             — 美国能源信息署
+  - NATO               Google News RSS site:nato.int            — 北约
+  - EU External Action Google News RSS site:eeas.europa.eu      — 欧盟对外行动署
+  - Press TV           Google News RSS site:presstv.ir          — 伊朗国家电视台
+  - IRNA               Google News RSS site:irna.ir             — 伊朗官方通讯社
+  - Tasnim News        Google News RSS site:tasnimnews.com      — 伊朗半官方通讯社
+  - 新华社             Google News 中文 RSS                     — 中国官方
+  - 中国日报           Google News 中文 RSS                     — 中国官方
+  - 环球时报           Google News 中文 RSS                     — 中国官方
+  - CGTN               Google News 中文 RSS                     — 中国官方
+  - The National       Google News RSS site:thenationalnews.com — 阿联酋视角
+  - Reuters Energy     Google News RSS site:reuters.com         — 路透能源
   - Hormuz/Shipping    Google News RSS 关键词聚合               — 航运/油轮动态
 
 数据库表：crude_news（写入 fund_data.db）
@@ -103,27 +110,70 @@ RSS_FEEDS = [
         "name": "IAEA",
         "url": "https://www.iaea.org/feeds/topnews",
         "default_category": "official_west",
-        "keywords": None,           # 发布频率低但信噪比极高，全量收录
+        "keywords": None,
         "base_priority": 2,
     },
     {
         "name": "White House",
         "url": _google_news_rss("site:whitehouse.gov Iran OR sanctions OR oil OR energy OR Gulf when:3d"),
         "default_category": "official_west",
-        "keywords": [
-            "Iran", "sanctions", "oil", "energy", "Gulf",
-            "nuclear", "OPEC", "Middle East", "Hormuz",
-        ],
+        "keywords": ["Iran", "sanctions", "oil", "energy", "Gulf", "nuclear", "OPEC", "Middle East", "Hormuz"],
         "base_priority": 2,
     },
     {
         "name": "State Dept",
         "url": _google_news_rss("site:state.gov Iran OR sanctions OR oil OR energy OR Gulf when:3d"),
         "default_category": "official_west",
-        "keywords": [
-            "Iran", "sanctions", "oil", "energy", "Gulf",
-            "nuclear", "JCPOA", "Middle East", "Hormuz",
-        ],
+        "keywords": ["Iran", "sanctions", "oil", "energy", "Gulf", "nuclear", "JCPOA", "Middle East", "Hormuz"],
+        "base_priority": 2,
+    },
+    {
+        "name": "Pentagon",
+        "url": _google_news_rss("site:defense.gov Iran OR Gulf OR Middle East OR military when:3d"),
+        "default_category": "official_west",
+        "keywords": ["Iran", "Gulf", "Middle East", "military", "deployment", "Hormuz"],
+        "base_priority": 2,
+    },
+    {
+        "name": "Treasury Dept",
+        "url": _google_news_rss("site:treasury.gov sanctions OR Iran OR oil when:7d"),
+        "default_category": "official_west",
+        "keywords": ["sanctions", "Iran", "oil", "embargo", "financial"],
+        "base_priority": 2,
+    },
+    {
+        "name": "UN News",
+        "url": "https://news.un.org/feed/subscribe/en/news/all/rss.xml",
+        "default_category": "official_west",
+        "keywords": ["Iran", "sanctions", "nuclear", "Middle East", "oil", "Gulf", "IAEA", "Security Council"],
+        "base_priority": 2,
+    },
+    {
+        "name": "Federal Reserve",
+        "url": "https://www.federalreserve.gov/feeds/press_all.xml",
+        "default_category": "official_west",
+        "keywords": ["oil", "energy", "inflation", "commodity", "price"],
+        "base_priority": 3,
+    },
+    {
+        "name": "EIA",
+        "url": _google_news_rss("site:eia.gov oil OR gas OR energy OR crude when:7d"),
+        "default_category": "official_west",
+        "keywords": ["oil", "crude", "energy", "production", "inventory", "price"],
+        "base_priority": 2,
+    },
+    {
+        "name": "NATO",
+        "url": _google_news_rss("site:nato.int Iran OR Middle East OR Gulf when:7d"),
+        "default_category": "official_west",
+        "keywords": ["Iran", "Middle East", "Gulf", "security", "military"],
+        "base_priority": 2,
+    },
+    {
+        "name": "EU External Action",
+        "url": _google_news_rss("site:eeas.europa.eu Iran OR nuclear OR sanctions OR energy when:7d"),
+        "default_category": "official_west",
+        "keywords": ["Iran", "nuclear", "JCPOA", "sanctions", "energy", "oil"],
         "base_priority": 2,
     },
 
