@@ -422,18 +422,18 @@ def get_hormuz_news(
 # GET /api/news/perspectives  — 多方视角对比
 # ---------------------------------------------------------------------------
 
-@news_router.get("/perspectives", summary="多方视角对比（欧美/中国/伊朗官方，各取24小时内相关度最高5条）")
+@news_router.get("/perspectives", summary="多方视角对比（欧美/中国/伊朗官方，各取相关度最高5条）")
 def get_news_perspectives():
     """
-    返回三方官方立场新闻，各取最近24小时内按相关度（priority ASC）排列的前5条。
-    无24小时数据时回退到7天。
+    返回三方官方立场新闻，各取按相关度（priority ASC）排列的前5条。
+    三级回退：24h → 7d → 30d，确保有足够数据。
 
     响应格式：
     {
       "west":  [{ "id", "title", "title_zh", "url", "source_name", "published_at", "priority" }, ...],
       "china": [...],
       "iran":  [...],
-      "window": "24h"   // 或 "7d"（回退时）
+      "window": "24h" | "7d" | "30d"
     }
     """
     _ensure_table()
@@ -442,6 +442,7 @@ def get_news_perspectives():
         now = datetime.now(timezone.utc)
         cutoff_24h = (now - timedelta(hours=24)).isoformat()
         cutoff_7d  = (now - timedelta(days=7)).isoformat()
+        cutoff_30d = (now - timedelta(days=30)).isoformat()
 
         def _fetch(cat: str, cutoff: str) -> list:
             rows = conn.execute(
@@ -456,19 +457,24 @@ def get_news_perspectives():
             ).fetchall()
             return [dict(r) for r in rows]
 
-        # 先尝试24小时，若三方均无数据则回退7天
+        # 三级回退：24h → 7d → 30d
         west_24h  = _fetch("official_west",  cutoff_24h)
         china_24h = _fetch("official_china", cutoff_24h)
         iran_24h  = _fetch("official_iran",  cutoff_24h)
-
         if west_24h or china_24h or iran_24h:
             return {"west": west_24h, "china": china_24h, "iran": iran_24h, "window": "24h"}
 
+        west_7d  = _fetch("official_west",  cutoff_7d)
+        china_7d = _fetch("official_china", cutoff_7d)
+        iran_7d  = _fetch("official_iran",  cutoff_7d)
+        if west_7d or china_7d or iran_7d:
+            return {"west": west_7d, "china": china_7d, "iran": iran_7d, "window": "7d"}
+
         return {
-            "west":   _fetch("official_west",  cutoff_7d),
-            "china":  _fetch("official_china", cutoff_7d),
-            "iran":   _fetch("official_iran",  cutoff_7d),
-            "window": "7d",
+            "west":   _fetch("official_west",  cutoff_30d),
+            "china":  _fetch("official_china", cutoff_30d),
+            "iran":   _fetch("official_iran",  cutoff_30d),
+            "window": "30d",
         }
     finally:
         conn.close()

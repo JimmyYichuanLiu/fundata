@@ -513,37 +513,39 @@ def init_fx_db(conn: sqlite3.Connection):
     conn.commit()
 
 
-def _sync_usdcny(conn: sqlite3.Connection, lookback_days: int = 90) -> int:
-    """
-    用 yfinance 拉取 USDCNY=X 近 lookback_days 天汇率，写入 fx_daily。
-    返回新增行数。
-    """
+def _sync_usdcny_yfinance(conn: sqlite3.Connection, lookback_days: int = 90) -> int:
+    """用 yfinance 拉取 USDCNY=X 历史汇率（境外/有代理环境）。"""
     try:
         import yfinance as yf
         import pandas as pd
     except ImportError:
-        logger.warning("yfinance 未安装，跳过 USD/CNY 汇率同步")
         return 0
 
     from datetime import date, timedelta
-    today  = date.today()
-    start  = (today - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
-    end    = today.strftime("%Y-%m-%d")
+    today = date.today()
+    start = (today - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+    end   = today.strftime("%Y-%m-%d")
 
     try:
         df = yf.download("USDCNY=X", start=start, end=end, progress=False, auto_adjust=True)
     except Exception as e:
-        logger.error("[fx] USDCNY=X 拉取失败: %s", e)
+        logger.warning("[fx] yfinance USDCNY=X 拉取失败: %s", e)
         return 0
 
     if df is None or df.empty:
-        logger.warning("[fx] USDCNY=X 返回空数据")
+        logger.warning("[fx] yfinance USDCNY=X 返回空数据")
         return 0
 
-    if isinstance(df.columns, pd.MultiIndex):
-        close_series = df[("Close", "USDCNY=X")]
-    else:
-        close_series = df["Close"]
+    try:
+        if isinstance(df.columns, pd.MultiIndex):
+            if ("Close", "USDCNY=X") in df.columns:
+                close_series = df[("Close", "USDCNY=X")]
+            else:
+                close_series = df["Close"].iloc[:, 0]
+        else:
+            close_series = df["Close"]
+    except Exception:
+        close_series = df.iloc[:, 3]
 
     added = 0
     for date_idx, rate_val in close_series.items():
@@ -557,7 +559,116 @@ def _sync_usdcny(conn: sqlite3.Connection, lookback_days: int = 90) -> int:
         if conn.execute("SELECT changes()").fetchone()[0]:
             added += 1
     conn.commit()
-    logger.info("[fx] USDCNY 新增 %d 行", added)
+    logger.info("[fx] yfinance USDCNY 新增 %d 行", added)
+    return added
+
+
+def _sync_usdcny_sina_hist(conn: sqlite3.Connection, lookback_days: int = 90) -> int:
+    """
+    从 Sina Finance 获取 USD/CNY 历史日频汇率（中国境内可访问）。
+    API: quotes.sina.cn/cn/api/json_v2.php/CN_MarketDataService.getKLineData
+    返回新增行数；失败时降级至实时报价。
+    """
+    try:
+        import requests
+    except ImportError:
+        return 0
+
+    url = (
+        "https://quotes.sina.cn/cn/api/json_v2.php/"
+        "CN_MarketDataService.getKLineData"
+        f"?symbol=usdcny&type=day&dateback=1&num={lookback_days}"
+    )
+    try:
+        resp = requests.get(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Referer":    "https://finance.sina.com.cn/",
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        logger.warning("[fx] Sina 历史汇率获取失败: %s，降级至实时报价", e)
+        return _sync_usdcny_sina_realtime(conn)
+
+    if not isinstance(data, list) or not data:
+        logger.warning("[fx] Sina 历史汇率返回空，降级至实时报价")
+        return _sync_usdcny_sina_realtime(conn)
+
+    added = 0
+    for item in data:
+        try:
+            # 格式: {"d":"2024-03-28","o":"7.23","h":"7.25","l":"7.22","c":"7.24","v":"0"}
+            date_str = item.get("d", "").replace("-", "")
+            rate = float(item.get("c", 0))
+            if not date_str or len(date_str) != 8 or rate <= 0:
+                continue
+            conn.execute(
+                "INSERT OR IGNORE INTO fx_daily (pair, trade_date, rate) VALUES (?, ?, ?)",
+                ("USDCNY", date_str, rate),
+            )
+            if conn.execute("SELECT changes()").fetchone()[0]:
+                added += 1
+        except Exception:
+            continue
+    conn.commit()
+    logger.info("[fx] Sina 历史 USD/CNY 新增 %d 行", added)
+    return added
+
+
+def _sync_usdcny_sina_realtime(conn: sqlite3.Connection) -> int:
+    """从 Sina Finance 实时报价获取今日 USD/CNY（历史接口失败时的最终保底）。"""
+    try:
+        import requests
+    except ImportError:
+        return 0
+
+    try:
+        resp = requests.get(
+            "https://hq.sinajs.cn/list=fx_susdcny",
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Referer":    "https://finance.sina.com.cn/",
+            },
+            timeout=10,
+        )
+        m = re.search(r'"([^"]+)"', resp.text)
+        if not m:
+            return 0
+        parts = m.group(1).split(",")
+        if len(parts) < 10:
+            return 0
+        rate = float(parts[1])
+        date_str = parts[9].replace("-", "")
+        if len(date_str) != 8:
+            date_str = datetime.now().strftime("%Y%m%d")
+        conn.execute(
+            "INSERT OR IGNORE INTO fx_daily (pair, trade_date, rate) VALUES (?, ?, ?)",
+            ("USDCNY", date_str, rate),
+        )
+        conn.commit()
+        added = conn.execute("SELECT changes()").fetchone()[0]
+        if added:
+            logger.info("[fx] Sina 实时 USD/CNY: %s = %.4f", date_str, rate)
+        return added
+    except Exception as e:
+        logger.warning("[fx] Sina 实时汇率获取失败: %s", e)
+        return 0
+
+
+def _sync_usdcny(conn: sqlite3.Connection, lookback_days: int = 90) -> int:
+    """
+    同步 USD/CNY 汇率到 fx_daily 表。
+    优先 yfinance（境外/代理），失败时降级至 Sina Finance（中国境内可访问）。
+    返回新增行数。
+    """
+    added = _sync_usdcny_yfinance(conn, lookback_days)
+    if added == 0:
+        logger.info("[fx] yfinance 无数据，尝试 Sina Finance")
+        added = _sync_usdcny_sina_hist(conn, lookback_days)
     return added
 
 

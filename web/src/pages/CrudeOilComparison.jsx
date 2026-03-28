@@ -387,16 +387,19 @@ export default function CrudeOilComparison() {
     setNewsSyncMsg('')
     try {
       await triggerNewsSync()
-      setNewsSyncMsg('新闻同步已启动，约30秒后完成')
+      setNewsSyncMsg('新闻同步已启动，正在刷新…')
+      const ac = new AbortController()
+      await Promise.all([
+        loadNews(ac.signal),
+        loadSummary(ac.signal),
+        loadHormuz(ac.signal),
+        loadPerspectives(ac.signal)
+      ])
+      setNewsSyncMsg('新闻已刷新')
       setTimeout(async () => {
         const s = await fetchNewsSyncStatus().catch(() => null)
         if (s) setNewsSyncStatus(s)
-        const ac = new AbortController()
-        loadNews(ac.signal)
-        loadSummary(ac.signal)
-        loadHormuz(ac.signal)
-        loadPerspectives(ac.signal)
-      }, 35000)
+      }, 30000)
     } catch (e) {
       setNewsSyncMsg(`失败: ${e.message}`)
     } finally {
@@ -1063,9 +1066,11 @@ export default function CrudeOilComparison() {
             <span className={`text-[11px] px-1.5 py-0.5 rounded font-medium ${
               perspectives.window === '24h'
                 ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400'
-                : 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
+                : perspectives.window === '7d'
+                ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
+                : 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400'
             }`}>
-              {perspectives.window === '24h' ? '过去24小时' : '回退至7天'}
+              {perspectives.window === '24h' ? '过去24小时' : perspectives.window === '7d' ? '回退至7天' : '回退至30天'}
             </span>
           )}
         </div>
