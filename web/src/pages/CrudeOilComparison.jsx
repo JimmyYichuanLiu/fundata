@@ -123,7 +123,7 @@ function statusBadge(status) {
 // ---------------------------------------------------------------------------
 
 export default function CrudeOilComparison() {
-  const [rangeIdx, setRangeIdx]       = useState(3)            // 默认近1年
+  const [rangeIdx, setRangeIdx]       = useState(1)            // 默认近3月
   const [customFrom, setCustomFrom]   = useState('')
   const [customTo,   setCustomTo]     = useState('')
   const [useCustom,  setUseCustom]    = useState(false)
@@ -137,17 +137,11 @@ export default function CrudeOilComparison() {
   const [scrubStart, setScrubStart] = useState(0)
   const [scrubEnd,   setScrubEnd]   = useState(0)
 
-  // Reset scrubber to last 3 months when items change
+  // Reset scrubber to show all fetched data when items change
   useEffect(() => {
     if (items.length === 0) return
+    setScrubStart(0)
     setScrubEnd(items.length - 1)
-    const lastDate = items[items.length - 1].trade_date
-    const last = new Date(lastDate.slice(0, 4) + '-' + lastDate.slice(4, 6) + '-' + lastDate.slice(6, 8))
-    const cutoffDate = new Date(last)
-    cutoffDate.setDate(cutoffDate.getDate() - 90)
-    const cutoff = cutoffDate.toISOString().slice(0, 10).replace(/-/g, '')
-    const startIdx = items.findIndex(it => it.trade_date >= cutoff)
-    setScrubStart(startIdx >= 0 ? startIdx : 0)
   }, [items])
 
   // Visible slice for chart
