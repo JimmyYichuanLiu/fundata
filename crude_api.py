@@ -29,6 +29,8 @@ from get_crude_data import (
     connect_and_fetch_crude,
     init_crude_db,
     init_cross_db,
+    init_fx_db,
+    get_usdcny_rate,
 )
 
 logger = logging.getLogger(__name__)
@@ -86,6 +88,7 @@ def _ensure_table():
     try:
         init_crude_db(conn)
         init_cross_db(conn)
+        init_fx_db(conn)
     finally:
         conn.close()
 
@@ -179,6 +182,15 @@ def get_crude_daily_compare(
             if r["is_reference"]:
                 date_map[d][f"{r['ts_code']}_is_reference"] = True
                 date_map[d][f"{r['ts_code']}_data_source"] = r["data_source"]
+
+        # 为每条记录补充 SC_USD（SC / USD/CNY 汇率）
+        for d, item in date_map.items():
+            sc_cny = item.get("SC")
+            if sc_cny is not None:
+                rate = get_usdcny_rate(conn, d)
+                if rate and rate > 0:
+                    item["SC_USD"] = round(sc_cny / rate, 4)
+                    item["SC_RATE"] = round(rate, 4)  # 供前端tooltip展示汇率
 
         # 按日期降序排列，截取 limit 条
         sorted_dates = sorted(date_map.keys(), reverse=True)[:limit]

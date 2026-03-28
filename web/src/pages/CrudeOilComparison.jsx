@@ -56,6 +56,7 @@ const SYMBOL_META = {
   WTI:      { label: 'WTI原油',      unit: 'USD/桶', yAxis: 'y'  },
   BRENT:    { label: 'Brent原油',    unit: 'USD/桶', yAxis: 'y'  },
   SC:       { label: '上海原油SC',   unit: 'CNY/桶', yAxis: 'y1' },
+  SC_USD:   { label: '上海原油SC（USD）', unit: 'USD/桶', yAxis: 'y'  },
   MURBAN:   { label: 'Murban原油',   unit: 'USD/桶', yAxis: 'y',  reference: true },
   DME_OMAN: { label: 'DME Oman原油', unit: 'USD/桶', yAxis: 'y',  reference: true },
 }
@@ -409,7 +410,7 @@ export default function CrudeOilComparison() {
     labels: visibleItems.map(it => yyyymmddToDisplay(it.trade_date)),
     datasets: [
       {
-        label:           SYMBOL_META.WTI.label,
+        label:           'WTI原油',
         data:            visibleItems.map(it => it.WTI ?? null),
         borderColor:     SYMBOL_COLORS.WTI.border,
         backgroundColor: SYMBOL_COLORS.WTI.background,
@@ -420,7 +421,7 @@ export default function CrudeOilComparison() {
         spanGaps: true,
       },
       {
-        label:           SYMBOL_META.BRENT.label,
+        label:           'Brent原油',
         data:            visibleItems.map(it => it.BRENT ?? null),
         borderColor:     SYMBOL_COLORS.BRENT.border,
         backgroundColor: SYMBOL_COLORS.BRENT.background,
@@ -431,36 +432,12 @@ export default function CrudeOilComparison() {
         spanGaps: true,
       },
       {
-        label:           SYMBOL_META.SC.label,
-        data:            visibleItems.map(it => it.SC ?? null),
+        label:           '上海原油SC（USD）',
+        data:            visibleItems.map(it => it.SC_USD ?? null),
         borderColor:     SYMBOL_COLORS.SC.border,
         backgroundColor: SYMBOL_COLORS.SC.background,
         borderWidth: 2,
         pointRadius: visibleItems.length > 200 ? 0 : 2,
-        tension: 0.1,
-        yAxisID: 'y1',
-        spanGaps: true,
-      },
-      {
-        label:           SYMBOL_META.MURBAN.label,
-        data:            visibleItems.map(it => it.MURBAN ?? null),
-        borderColor:     SYMBOL_COLORS.MURBAN.border,
-        backgroundColor: SYMBOL_COLORS.MURBAN.background,
-        borderWidth: 1.5,
-        borderDash:      [4, 3],
-        pointRadius: 0,
-        tension: 0.1,
-        yAxisID: 'y',
-        spanGaps: true,
-      },
-      {
-        label:           SYMBOL_META.DME_OMAN.label,
-        data:            visibleItems.map(it => it.DME_OMAN ?? null),
-        borderColor:     SYMBOL_COLORS.DME_OMAN.border,
-        backgroundColor: SYMBOL_COLORS.DME_OMAN.background,
-        borderWidth: 1.5,
-        borderDash:      [4, 3],
-        pointRadius: 0,
         tension: 0.1,
         yAxisID: 'y',
         spanGaps: true,
@@ -468,7 +445,7 @@ export default function CrudeOilComparison() {
     ],
   }
 
-  const _DATASET_SYMS = ['WTI', 'BRENT', 'SC', 'MURBAN', 'DME_OMAN']
+  const _DATASET_SYMS = ['WTI', 'BRENT', 'SC_USD']
 
   const chartOptions = {
     responsive: true,
@@ -477,40 +454,32 @@ export default function CrudeOilComparison() {
       legend: { position: 'top' },
       title: {
         display: true,
-        text: '全球原油价格对比（WTI / Brent / 上海SC / Murban / DME Oman）',
+        text: '全球原油价格对比（WTI / Brent / 上海SC，均以 USD/桶计）',
         font: { size: 15 },
       },
       tooltip: {
         callbacks: {
           label(ctx) {
-            const sym  = _DATASET_SYMS[ctx.datasetIndex]
-            const meta = SYMBOL_META[sym]
-            const val  = ctx.parsed.y
+            const val = ctx.parsed.y
             if (val == null) return ''
-            const refTag = meta?.reference ? ' ⚠参考' : ''
-            return `${ctx.dataset.label}: ${val.toFixed(2)} ${meta?.unit || ''}${refTag}`
+            const item = visibleItems[ctx.dataIndex]
+            if (ctx.datasetIndex === 2 && item?.SC_RATE) {
+              return `${ctx.dataset.label}: ${val.toFixed(2)} USD/桶（汇率 ${item.SC_RATE} CNY=${item.SC?.toFixed(2)} CNY）`
+            }
+            return `${ctx.dataset.label}: ${val.toFixed(2)} USD/桶`
           },
         },
       },
     },
     scales: {
       x: {
-        ticks: {
-          maxTicksLimit: 12,
-          maxRotation: 0,
-        },
+        ticks: { maxTicksLimit: 12, maxRotation: 0 },
       },
       y: {
         type:     'linear',
         position: 'left',
         title:    { display: true, text: 'USD / 桶' },
         grid:     { color: 'rgba(0,0,0,0.05)' },
-      },
-      y1: {
-        type:     'linear',
-        position: 'right',
-        title:    { display: true, text: 'CNY / 桶' },
-        grid:     { drawOnChartArea: false },
       },
     },
   }
@@ -644,72 +613,99 @@ export default function CrudeOilComparison() {
         )}
       </div>
 
-      {/* 说明卡片 */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        {Object.entries(SYMBOL_META).map(([sym, meta]) => {
-          const last = recentRows.find(r => r[sym] != null)
+      {/* ── 价格卡片（2+1+2 布局）──────────────────────────────────────────── */}
+      {(() => {
+        // 交割规格 tooltip 内容
+        const SPECS = {
+          WTI:      'WTI（West Texas Intermediate）\n交割地：美国俄克拉荷马州 Cushing\n品质：轻质低硫（API≈39.6°，含硫≈0.24%）\n单位：1000桶/手\n结算：实物交割',
+          BRENT:    'Brent原油\n交割地：北海（Sullom Voe终端）\n品质：轻质低硫（API≈38.3°，含硫≈0.37%）\n单位：1000桶/手\n结算：EFP现金结算为主',
+          SC:       '上海原油期货（SC）\nINE上海国际能源交易中心主力连续合约\n交割地：上海/宁波/舟山等保税仓库\n品质：中质含硫（API 32°±2°，含硫≤2%）\n单位：1000桶/手\n结算：人民币计价实物交割',
+          MURBAN:   'Murban原油\nICE IFAD（阿布扎比国际衍生品交易所）\n品质：超轻质低硫（API≈40°，含硫≈0.6%）\n产地：阿布扎比ADNOC\n结算：实物交割，交割地阿联酋',
+          DME_OMAN: 'DME Oman原油\nDME（迪拜商品交易所）\n品质：中质含硫（API≈33°，含硫≈1.0%）\n产地：阿曼，亚洲定价基准\n单位：1000桶/手\n结算：实物交割',
+        }
+
+        // 找最近有数据的行
+        function lastVal(sym) {
+          return recentRows.find(r => r[sym] != null)
+        }
+
+        function PriceCard({ sym, color }) {
+          const last = lastVal(sym)
+          const isSC = sym === 'SC'
+          const displayVal = isSC
+            ? (last?.SC_USD != null ? `$${last.SC_USD.toFixed(2)}` : '—')
+            : (last?.[sym] != null ? `$${last[sym].toFixed(2)}` : '—')
+
           return (
-            <div
-              key={sym}
-              className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700 p-4 shadow-sm"
-              style={{ borderLeft: `4px solid ${SYMBOL_COLORS[sym].border}` }}
-            >
-              <div className="text-xs text-slate-400 mb-1">{meta.label}</div>
-              <div className="text-2xl font-bold">
-                {last?.[sym] != null ? last[sym].toFixed(2) : '—'}
-              </div>
-              <div className="text-xs text-slate-400 mt-1">{meta.unit}</div>
-              {last && (
-                <div className="text-xs text-slate-400 mt-1">
-                  {yyyymmddToDisplay(last.trade_date)}
+            <div className="group relative">
+              <div
+                className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700 p-4 shadow-sm h-full"
+                style={{ borderLeft: `4px solid ${color}` }}
+              >
+                <div className="text-xs text-slate-400 mb-0.5 flex items-center gap-1">
+                  {SYMBOL_META[sym]?.label || sym}
+                  <span className="text-slate-300 dark:text-slate-600 cursor-help">ⓘ</span>
                 </div>
-              )}
+                <div className="text-2xl font-bold text-slate-800 dark:text-slate-100">
+                  {displayVal}
+                </div>
+                <div className="text-xs text-slate-400 mt-0.5">USD/桶</div>
+                {isSC && last?.SC != null && (
+                  <div className="text-xs text-slate-400 mt-0.5">
+                    ≈ ¥{last.SC.toFixed(2)} CNY
+                    {last.SC_RATE && <span className="ml-1">(汇率 {last.SC_RATE})</span>}
+                  </div>
+                )}
+                {last && (
+                  <div className="text-xs text-slate-400 mt-1">{yyyymmddToDisplay(last.trade_date)}</div>
+                )}
+                {SYMBOL_META[sym]?.reference && (
+                  <div className="text-[10px] text-amber-500 mt-1">⚠ 参考价</div>
+                )}
+              </div>
+              {/* Hover tooltip */}
+              <div className="pointer-events-none absolute bottom-full left-0 mb-2 z-50 hidden group-hover:block w-64">
+                <div className="bg-slate-800 text-white text-xs rounded-lg px-3 py-2 shadow-xl whitespace-pre-line leading-relaxed">
+                  {SPECS[sym]}
+                </div>
+                <div className="w-2 h-2 bg-slate-800 rotate-45 ml-4 -mt-1" />
+              </div>
             </div>
           )
-        })}
+        }
+
+        return (
+          <div className="grid grid-cols-3 gap-3">
+            {/* 左列：WTI 上 / Brent 下 */}
+            <div className="flex flex-col gap-3">
+              <PriceCard sym="WTI"   color={SYMBOL_COLORS.WTI.border} />
+              <PriceCard sym="BRENT" color={SYMBOL_COLORS.BRENT.border} />
+            </div>
+            {/* 中列：上海SC（大卡片） */}
+            <div>
+              <PriceCard sym="SC" color={SYMBOL_COLORS.SC.border} />
+            </div>
+            {/* 右列：Murban 上 / DME Oman 下 */}
+            <div className="flex flex-col gap-3">
+              <PriceCard sym="MURBAN"   color={SYMBOL_COLORS.MURBAN.border} />
+              <PriceCard sym="DME_OMAN" color={SYMBOL_COLORS.DME_OMAN.border} />
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* 更多数据链接 */}
+      <div className="flex justify-end">
+        <a
+          href="/crude/data"
+          className="text-sm text-primary hover:underline flex items-center gap-1"
+        >
+          <span className="material-symbols-outlined text-base">table_view</span>
+          更多数据（近30交易日）
+        </a>
       </div>
 
-      {/* 最近30日数据表 */}
-      {recentRows.length > 0 && (
-        <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm overflow-hidden">
-          <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-700 font-medium text-sm">
-            最近 {recentRows.length} 个交易日
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="bg-slate-50 dark:bg-slate-800">
-                  <th className="px-4 py-2 text-left font-medium text-slate-600 dark:text-slate-400">日期</th>
-                  <th className="px-4 py-2 text-right font-medium" style={{ color: SYMBOL_COLORS.WTI.border }}>WTI (USD/桶)</th>
-                  <th className="px-4 py-2 text-right font-medium" style={{ color: SYMBOL_COLORS.BRENT.border }}>Brent (USD/桶)</th>
-                  <th className="px-4 py-2 text-right font-medium" style={{ color: SYMBOL_COLORS.SC.border }}>上海SC (CNY/桶)</th>
-                </tr>
-              </thead>
-              <tbody>
-                {recentRows.map((row, idx) => (
-                  <tr
-                    key={row.trade_date}
-                    className={`border-t border-slate-100 dark:border-slate-800 ${
-                      idx % 2 === 0 ? '' : 'bg-slate-50/40 dark:bg-slate-800/20'
-                    }`}
-                  >
-                    <td className="px-4 py-2 text-slate-500">{yyyymmddToDisplay(row.trade_date)}</td>
-                    <td className="px-4 py-2 text-right font-mono">
-                      {row.WTI != null ? row.WTI.toFixed(2) : <span className="text-slate-300">—</span>}
-                    </td>
-                    <td className="px-4 py-2 text-right font-mono">
-                      {row.BRENT != null ? row.BRENT.toFixed(2) : <span className="text-slate-300">—</span>}
-                    </td>
-                    <td className="px-4 py-2 text-right font-mono">
-                      {row.SC != null ? row.SC.toFixed(2) : <span className="text-slate-300">—</span>}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
+      {/* 最近30日数据表 — 已移至 /crude/data 页面 */}
 
       {/* 数据来源注释 + 时区说明 */}
       <div className="text-xs text-slate-400 space-y-1">

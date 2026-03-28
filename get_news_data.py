@@ -260,6 +260,15 @@ def _calc_priority(feed_cfg: dict, title: str, summary: str) -> int:
 
 
 # ---------------------------------------------------------------------------
+# 工具：检测字符串是否含CJK字符
+# ---------------------------------------------------------------------------
+
+def _has_cjk(text: str) -> bool:
+    """返回 True 若文本中含有中日韩字符（CJK Unified Ideographs）。"""
+    return any('\u4e00' <= ch <= '\u9fff' for ch in text)
+
+
+# ---------------------------------------------------------------------------
 # 翻译
 # ---------------------------------------------------------------------------
 
@@ -416,12 +425,20 @@ def _fetch_feed(conn: sqlite3.Connection, feed_cfg: dict) -> Tuple[int, str]:
             )
             if conn.execute("SELECT changes()").fetchone()[0] > 0:
                 added += 1
-                # 中文源：title 本身就是中文，直接存为 title_zh
+                # 中文源：检测是否含CJK字符，含则直接存title_zh，否则仍走翻译
                 if is_chinese:
-                    conn.execute(
-                        "UPDATE crude_news SET title_zh = ? WHERE url = ?",
-                        (title, link),
-                    )
+                    if _has_cjk(title):
+                        conn.execute(
+                            "UPDATE crude_news SET title_zh = ? WHERE url = ?",
+                            (title, link),
+                        )
+                    elif priority <= TRANSLATE_PRIORITY_THRESHOLD:
+                        title_zh = _translate_to_zh(title)
+                        if title_zh is not None:
+                            conn.execute(
+                                "UPDATE crude_news SET title_zh = ? WHERE url = ?",
+                                (title_zh, link),
+                            )
                 # 英文源：仅翻译高优先级新闻（priority <= 阈值），控制 HTTP 请求量
                 elif priority <= TRANSLATE_PRIORITY_THRESHOLD:
                     title_zh = _translate_to_zh(title)

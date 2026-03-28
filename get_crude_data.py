@@ -496,6 +496,90 @@ def _sync_scrape(conn: sqlite3.Connection, ts_code: str, cfg: dict) -> int:
 
 
 # ---------------------------------------------------------------------------
+# USD/CNY 汇率同步（yfinance USDCNY=X，写入 fx_daily 表）
+# ---------------------------------------------------------------------------
+
+def init_fx_db(conn: sqlite3.Connection):
+    """创建 fx_daily 汇率表（若不存在）。"""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS fx_daily (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            pair       TEXT NOT NULL,
+            trade_date TEXT NOT NULL,
+            rate       REAL NOT NULL,
+            UNIQUE(pair, trade_date)
+        )
+    """)
+    conn.commit()
+
+
+def _sync_usdcny(conn: sqlite3.Connection, lookback_days: int = 90) -> int:
+    """
+    用 yfinance 拉取 USDCNY=X 近 lookback_days 天汇率，写入 fx_daily。
+    返回新增行数。
+    """
+    try:
+        import yfinance as yf
+        import pandas as pd
+    except ImportError:
+        logger.warning("yfinance 未安装，跳过 USD/CNY 汇率同步")
+        return 0
+
+    from datetime import date, timedelta
+    today  = date.today()
+    start  = (today - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+    end    = today.strftime("%Y-%m-%d")
+
+    try:
+        df = yf.download("USDCNY=X", start=start, end=end, progress=False, auto_adjust=True)
+    except Exception as e:
+        logger.error("[fx] USDCNY=X 拉取失败: %s", e)
+        return 0
+
+    if df is None or df.empty:
+        logger.warning("[fx] USDCNY=X 返回空数据")
+        return 0
+
+    if isinstance(df.columns, pd.MultiIndex):
+        close_series = df[("Close", "USDCNY=X")]
+    else:
+        close_series = df["Close"]
+
+    added = 0
+    for date_idx, rate_val in close_series.items():
+        if pd.isna(rate_val):
+            continue
+        trade_date = date_idx.strftime("%Y%m%d")
+        conn.execute(
+            "INSERT OR IGNORE INTO fx_daily (pair, trade_date, rate) VALUES (?, ?, ?)",
+            ("USDCNY", trade_date, float(rate_val)),
+        )
+        if conn.execute("SELECT changes()").fetchone()[0]:
+            added += 1
+    conn.commit()
+    logger.info("[fx] USDCNY 新增 %d 行", added)
+    return added
+
+
+def get_usdcny_rate(conn: sqlite3.Connection, trade_date: str) -> float | None:
+    """
+    查询指定日期的 USD/CNY 汇率，无则向前找最近7日内的最新值。
+    返回 float 或 None。
+    """
+    from datetime import datetime, timedelta
+    d = datetime.strptime(trade_date, "%Y%m%d")
+    for offset in range(8):
+        candidate = (d - timedelta(days=offset)).strftime("%Y%m%d")
+        row = conn.execute(
+            "SELECT rate FROM fx_daily WHERE pair='USDCNY' AND trade_date=?",
+            (candidate,),
+        ).fetchone()
+        if row:
+            return float(row[0])
+    return None
+
+
+# ---------------------------------------------------------------------------
 # 交叉验证：yfinance vs akshare
 # ---------------------------------------------------------------------------
 
@@ -600,6 +684,7 @@ def connect_and_fetch_crude(db_path: str = DB_PATH):
     try:
         init_crude_db(conn)
         init_cross_db(conn)
+        init_fx_db(conn)
 
         now_str = datetime.now().isoformat()
         _set_sync_key(conn, "crude_last_status", "running")
@@ -631,6 +716,12 @@ def connect_and_fetch_crude(db_path: str = DB_PATH):
             logger.info("交叉验证完毕，更新 %d 行", cross_updated)
         except Exception as e:
             logger.error("交叉验证失败（不影响主数据入库）: %s", e)
+
+        # USD/CNY 汇率同步
+        try:
+            _sync_usdcny(conn)
+        except Exception as e:
+            logger.error("USD/CNY 汇率同步失败（不影响主数据）: %s", e)
 
         if errors:
             _set_sync_key(conn, "crude_last_status", "partial_error")
