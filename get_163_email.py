@@ -89,6 +89,13 @@ def init_database(db_path):
     except Exception:
         pass  # 列已存在则忽略
 
+    # 迁移：为已有数据库添加 adjusted_nav 列（复权累计净值）
+    try:
+        cursor.execute('ALTER TABLE fund_nav_data ADD COLUMN adjusted_nav REAL')
+        conn.commit()
+    except Exception:
+        pass  # 列已存在则忽略
+
     # 迁移：从现有 fund_nav_data 填充 funds 表（按首次插入时间排序，保证 fund_id 连续递增）
     cursor.execute('SELECT COUNT(*) FROM funds')
     if cursor.fetchone()[0] == 0:
@@ -445,6 +452,80 @@ def insert_data_to_db(conn, df, failed_inserts, source_id=None):
 
     conn.commit()
     return inserted_count, skipped_count
+
+
+def compute_adjusted_nav(conn, product_code):
+    """增量计算指定基金的复权累计净值（adjusted_nav），从最早的 NULL 行开始往后算。
+
+    公式（初始值 = 1.0）：
+      1. 累计分红[t] = accumulated_nav[t] - unit_nav[t]
+      2. 当期分红[t] = 累计分红[t] - 累计分红[t-1]
+      3. Rt[t]       = (当期分红[t] + unit_nav[t]) / unit_nav[t-1] - 1
+      4. adjusted[t] = adjusted[t-1] * (1 + Rt[t])
+    当 accumulated_nav 为 NULL 时，视为等于 unit_nav（即无分红）。
+    """
+    rows = conn.execute(
+        """
+        SELECT id, 净值日期, 单位净值, 累计单位净值, adjusted_nav
+        FROM fund_nav_data
+        WHERE 产品代码 = ? AND 净值日期 IS NOT NULL AND 单位净值 IS NOT NULL AND 单位净值 > 0
+        ORDER BY 净值日期 ASC
+        """,
+        (product_code,)
+    ).fetchall()
+
+    if not rows:
+        return
+
+    # 找到第一条 adjusted_nav 为 NULL 的行
+    first_null_idx = next((i for i, r in enumerate(rows) if r[4] is None), None)
+    if first_null_idx is None:
+        return  # 已全部计算完毕
+
+    updates = []
+
+    if first_null_idx == 0:
+        # 从头开始：第一条的 adjusted_nav = 1.0
+        adjusted = 1.0
+        unit0 = rows[0][2]
+        acc0_raw = rows[0][3]
+        prev_unit = unit0
+        prev_acc  = acc0_raw if acc0_raw is not None else unit0
+        updates.append((adjusted, rows[0][0]))
+        start_idx = 1
+    else:
+        # 从上一条已算好的行衔接
+        last = rows[first_null_idx - 1]
+        adjusted  = last[4]
+        prev_unit = last[2]
+        prev_acc_raw = last[3]
+        prev_acc  = prev_acc_raw if prev_acc_raw is not None else prev_unit
+        start_idx = first_null_idx
+
+    for i in range(start_idx, len(rows)):
+        row = rows[i]
+        unit    = row[2]
+        acc_raw = row[3]
+        acc     = acc_raw if acc_raw is not None else unit
+
+        div_cum_curr = acc      - unit
+        div_cum_prev = prev_acc - prev_unit
+        dividend     = div_cum_curr - div_cum_prev
+
+        if prev_unit > 0:
+            rt = (dividend + unit) / prev_unit - 1
+            adjusted = adjusted * (1 + rt)
+
+        updates.append((adjusted, row[0]))
+        prev_unit = unit
+        prev_acc  = acc
+
+    if updates:
+        conn.executemany(
+            "UPDATE fund_nav_data SET adjusted_nav = ? WHERE id = ?",
+            updates
+        )
+        conn.commit()
 
 
 def print_failure_report(failed_extractions, failed_inserts):
@@ -875,6 +956,17 @@ def connect_and_fetch_email(email_user, email_pwd, db_path):
         # 保存同步状态（记录本次处理到的最大 UID）
         save_sync_state(conn, max_uid, server_uidvalidity)
         print(f"同步状态已更新：last_uid={max_uid}")
+
+        # 增量计算复权累计净值（只处理有 NULL 行的基金）
+        if total_data_inserted > 0:
+            null_funds = conn.execute(
+                "SELECT DISTINCT 产品代码 FROM fund_nav_data WHERE adjusted_nav IS NULL AND 产品代码 IS NOT NULL"
+            ).fetchall()
+            if null_funds:
+                print(f"\n计算复权累计净值（共 {len(null_funds)} 个基金）...")
+                for (product_code,) in null_funds:
+                    compute_adjusted_nav(conn, product_code)
+                print("复权净值计算完成")
 
         # 显示统计信息
         print("\n" + "="*80)

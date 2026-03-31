@@ -16,6 +16,7 @@
 import os
 import sqlite3
 from dotenv import load_dotenv
+from get_163_email import compute_adjusted_nav
 
 
 def check1_nav_out_of_range(src_conn):
@@ -270,6 +271,13 @@ def main():
     check2_details = check2_same_name_multi_code(src_conn)
     check3_rows = check3_duplicate_nav_dates(src_conn)
     total_src, written, excluded = build_clean_db(src_conn, clean_db_path)
+
+    # 对所有基金全量计算复权累计净值（仅更新 NULL 行）
+    all_funds = src_conn.execute(
+        "SELECT DISTINCT 产品代码 FROM fund_nav_data WHERE 产品代码 IS NOT NULL"
+    ).fetchall()
+    for (product_code,) in all_funds:
+        compute_adjusted_nav(src_conn, product_code)
 
     src_conn.close()
 

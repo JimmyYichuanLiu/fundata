@@ -66,7 +66,7 @@ def export_tables(tables: list, out_path: str):
                     for v in row
                 )
                 f.write(f"INSERT OR REPLACE INTO {table} VALUES ({vals});\n")
-    f.write("\nCOMMIT;\n")
+        f.write("\nCOMMIT;\n")
     conn.close()
 
 

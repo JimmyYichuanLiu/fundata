@@ -7,8 +7,11 @@
 export function computeMetrics(items, navType = 'unit') {
   if (!items || items.length < 2) return null
 
-  const getVal = item =>
-    navType === 'unit' ? item.unit_nav : (item.accumulated_nav ?? item.unit_nav)
+  const getVal = item => {
+    if (navType === 'adjusted') return item.adjusted_nav ?? item.unit_nav
+    if (navType === 'unit') return item.unit_nav
+    return item.accumulated_nav ?? item.unit_nav
+  }
 
   const vals = items.map(getVal).filter(v => v != null && !isNaN(v) && isFinite(v))
   if (vals.length < 2) return null
@@ -276,8 +279,11 @@ export function computeBenchmarkMetrics(fundItems, benchItems, navType = 'unit')
 export function computeTopDrawdowns(items, navType = 'unit', count = 5) {
   if (!items || items.length < 2) return []
 
-  const getVal = item =>
-    navType === 'unit' ? item.unit_nav : (item.accumulated_nav ?? item.unit_nav)
+  const getVal = item => {
+    if (navType === 'adjusted') return item.adjusted_nav ?? item.unit_nav
+    if (navType === 'unit') return item.unit_nav
+    return item.accumulated_nav ?? item.unit_nav
+  }
 
   const vals = []
   const dates = []
@@ -358,8 +364,11 @@ export function computeTopDrawdowns(items, navType = 'unit', count = 5) {
 export function computePeriodicReturns(items, navType = 'unit', frequency = 'monthly') {
   if (!items || items.length < 2) return []
 
-  const getVal = item =>
-    navType === 'unit' ? item.unit_nav : (item.accumulated_nav ?? item.unit_nav)
+  const getVal = item => {
+    if (navType === 'adjusted') return item.adjusted_nav ?? item.unit_nav
+    if (navType === 'unit') return item.unit_nav
+    return item.accumulated_nav ?? item.unit_nav
+  }
 
   function getPeriodKey(dateStr) {
     const y = dateStr.slice(0, 4)

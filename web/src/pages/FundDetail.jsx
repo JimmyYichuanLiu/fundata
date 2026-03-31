@@ -134,9 +134,11 @@ export default function FundDetail() {
   const normalizedData = useMemo(() => {
     if (!benchmarkCode || benchmarkItems.length === 0 || filteredItems.length === 0) return null
 
-    const getVal = item => navType === 'unit' || navType === 'return'
-      ? item.unit_nav
-      : (item.accumulated_nav ?? item.unit_nav)
+    const getVal = item => {
+      if (navType === 'unit' || navType === 'return') return item.unit_nav
+      if (navType === 'adjusted') return item.adjusted_nav ?? item.unit_nav
+      return item.accumulated_nav ?? item.unit_nav
+    }
     const sortedBench = [...benchmarkItems].sort((a, b) => a.trade_date.localeCompare(b.trade_date))
 
     let benchIdx = 0
@@ -193,6 +195,11 @@ export default function FundDetail() {
   // ── Derived ──
   const hasAccumulated = useMemo(
     () => navItems.some(item => item.accumulated_nav != null),
+    [navItems],
+  )
+
+  const hasAdjusted = useMemo(
+    () => navItems.some(item => item.adjusted_nav != null),
     [navItems],
   )
 
@@ -381,6 +388,7 @@ export default function FundDetail() {
             navType={navType}
             setNavType={setNavType}
             hasAccumulated={hasAccumulated}
+            hasAdjusted={hasAdjusted}
             loading={loading}
             onRetry={onRetry}
             activeDays={activeDays}
@@ -396,10 +404,12 @@ export default function FundDetail() {
 
         {activeTab === 'metrics' && (
           <MetricsTab
+            navItems={navItems}
             filteredItems={filteredItems}
             navType={navType}
             benchmarkCode={benchmarkCode}
             normalizedData={normalizedData}
+            benchmarkItems={benchmarkItems}
           />
         )}
 

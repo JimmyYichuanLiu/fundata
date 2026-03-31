@@ -35,6 +35,41 @@ const RANGE_OPTIONS = [
   { label: '全部', days: 0 },
 ]
 
+/**
+ * 从 navItems 中提取出现的年份列表，以及"今年以来"的起始日期（前一年12月31日）。
+ * 返回: [{ label, from, to }, ...]
+ */
+function buildYearOptions(navItems) {
+  if (!navItems || navItems.length === 0) return []
+  const dates = navItems.map(i => i.nav_date).filter(Boolean)
+  const firstDate = dates[0]
+  const lastDate = dates[dates.length - 1]
+  const firstYear = parseInt(firstDate.slice(0, 4))
+  const lastYear = parseInt(lastDate.slice(0, 4))
+  const today = lastDate
+
+  const opts = []
+
+  // 今年以来
+  const ytdFrom = `${lastYear - 1}-12-31`
+  if (ytdFrom >= firstDate || firstYear === lastYear) {
+    opts.push({ label: '今年以来', from: ytdFrom < firstDate ? firstDate : ytdFrom, to: today, isYtd: true })
+  }
+
+  // 每个自然年（从前一年12-31到本年12-31）
+  for (let y = lastYear; y >= firstYear; y--) {
+    const from = `${y - 1}-12-31`
+    const to = y === lastYear ? today : `${y}-12-31`
+    // 只在区间内有数据时才显示
+    const hasData = dates.some(d => d >= from && d <= to)
+    if (hasData) {
+      opts.push({ label: String(y), from, to })
+    }
+  }
+
+  return opts
+}
+
 export const BENCHMARK_OPTIONS = [
   { label: '无', code: null },
   { label: '中证1000', code: '000852.SH' },
@@ -107,6 +142,7 @@ export default function ChartTab({
   navType,
   setNavType,
   hasAccumulated,
+  hasAdjusted,
   loading,
   onRetry,
   activeDays,
@@ -126,6 +162,8 @@ export default function ChartTab({
   const [navForm, setNavForm] = useState({ nav_date: '', unit_nav: '', accumulated_nav: '' })
   const [submitting, setSubmitting] = useState(false)
   const [navFormError, setNavFormError] = useState('')
+
+  const yearOptions = useMemo(() => buildYearOptions(navItems), [navItems])
 
   const isBenchmarkMode = !!(normalizedData && benchmarkCode)
 
@@ -221,6 +259,8 @@ export default function ChartTab({
     if (navType === 'return') {
       const base = filteredItems.length > 0 ? (filteredItems[0].unit_nav || 1) : 1
       values = filteredItems.map(i => i.unit_nav / base)
+    } else if (navType === 'adjusted') {
+      values = filteredItems.map(i => i.adjusted_nav ?? i.unit_nav)
     } else {
       values = filteredItems.map(i =>
         navType === 'unit' ? i.unit_nav : (i.accumulated_nav ?? i.unit_nav)
@@ -284,7 +324,7 @@ export default function ChartTab({
       labels: chartData.labels,
       datasets: [
         {
-          label: navType === 'unit' ? '单位净值' : '累计净值',
+          label: navType === 'unit' ? '单位净值' : navType === 'adjusted' ? '复权净值' : '累计净值',
           data: chartData.values,
           borderColor: '#3b82f6',
           backgroundColor: gradient || 'rgba(59,130,246,0.15)',
@@ -303,7 +343,10 @@ export default function ChartTab({
   // ── Drawdown chart ──
   const drawdownSeries = useMemo(() => {
     if (filteredItems.length < 2) return null
-    const getVal = item => navType === 'unit' ? item.unit_nav : (item.accumulated_nav ?? item.unit_nav)
+    const getVal = item => {
+      if (navType === 'adjusted') return item.adjusted_nav ?? item.unit_nav
+      return navType === 'unit' ? item.unit_nav : (item.accumulated_nav ?? item.unit_nav)
+    }
     let peak = getVal(filteredItems[0])
     const dd = filteredItems.map(item => {
       const v = getVal(item)
@@ -572,10 +615,32 @@ export default function ChartTab({
                 {opt.label}
               </button>
             ))}
+            {yearOptions.map(opt => (
+              <button
+                key={opt.label}
+                onClick={() => {
+                  setIsCustomRange(true)
+                  setActiveDays(0)
+                  setCustomFrom(opt.from)
+                  setCustomTo(opt.to)
+                }}
+                className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                  isCustomRange && customFrom === opt.from && customTo === opt.to
+                    ? 'bg-blue-600 text-white'
+                    : opt.isYtd
+                      ? 'bg-blue-50 text-blue-600 hover:bg-blue-100'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
             <button
               onClick={() => setIsCustomRange(true)}
               className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-                isCustomRange ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                isCustomRange && !yearOptions.some(o => o.from === customFrom && o.to === customTo)
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
               }`}
             >
               自定义
@@ -600,6 +665,16 @@ export default function ChartTab({
                   }`}
                 >
                   累计净值
+                </button>
+              )}
+              {hasAdjusted && (
+                <button
+                  onClick={() => setNavType('adjusted')}
+                  className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                    navType === 'adjusted' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                  }`}
+                >
+                  复权净值
                 </button>
               )}
               <button

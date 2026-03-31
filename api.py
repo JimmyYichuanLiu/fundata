@@ -137,6 +137,12 @@ def _init_db_schema():
         except Exception:
             pass  # column already exists
 
+        # Add adjusted_nav column to fund_nav_data if missing
+        try:
+            conn.execute('ALTER TABLE fund_nav_data ADD COLUMN adjusted_nav REAL')
+        except Exception:
+            pass  # column already exists
+
         # Populate funds from fund_nav_data if empty
         empty = conn.execute('SELECT COUNT(*) FROM funds').fetchone()[0] == 0
         if empty:
@@ -256,6 +262,7 @@ class NavRecord(BaseModel):
     nav_date: str                      # YYYY-MM-DD
     unit_nav: float
     accumulated_nav: Optional[float]
+    adjusted_nav: Optional[float]
     insert_time: Optional[str]
     source_id: Optional[int]           # NULL = manually entered
 
@@ -496,6 +503,10 @@ def nav_row_to_model(row) -> NavRecord:
         accumulated_nav = float(row["累计单位净值"]) if row["累计单位净值"] is not None else None
     except (TypeError, ValueError):
         accumulated_nav = None
+    try:
+        adjusted_nav = float(row["adjusted_nav"]) if row["adjusted_nav"] is not None else None
+    except (TypeError, ValueError):
+        adjusted_nav = None
     return NavRecord(
         id=row["id"],
         fund_id=row["fund_id"],
@@ -504,6 +515,7 @@ def nav_row_to_model(row) -> NavRecord:
         nav_date=db_date_to_api(row["净值日期"]),
         unit_nav=unit_nav,
         accumulated_nav=accumulated_nav,
+        adjusted_nav=adjusted_nav,
         insert_time=row["插入时间"],
         source_id=row["source_id"],
     )
@@ -1184,7 +1196,7 @@ def get_fund_nav(
 
     rows = conn.execute(
         f"""
-        SELECT id, fund_id, 产品名称, 产品代码, 净值日期, 单位净值, 累计单位净值, 插入时间, source_id
+        SELECT id, fund_id, 产品名称, 产品代码, 净值日期, 单位净值, 累计单位净值, adjusted_nav, 插入时间, source_id
         FROM fund_nav_data
         WHERE {where_clause}
         ORDER BY 净值日期 ASC
@@ -1228,7 +1240,7 @@ def create_nav(body: NavCreateRequest, conn: sqlite3.Connection = Depends(get_db
     conn.commit()
 
     row = conn.execute(
-        "SELECT id, fund_id, 产品名称, 产品代码, 净值日期, 单位净值, 累计单位净值, 插入时间, source_id "
+        "SELECT id, fund_id, 产品名称, 产品代码, 净值日期, 单位净值, 累计单位净值, adjusted_nav, 插入时间, source_id "
         "FROM fund_nav_data WHERE id = ?",
         (new_id,),
     ).fetchone()
@@ -1240,7 +1252,7 @@ def create_nav(body: NavCreateRequest, conn: sqlite3.Connection = Depends(get_db
 @app.get("/api/nav/{nav_id}", response_model=NavRecord, tags=["nav"])
 def get_nav(nav_id: int, conn: sqlite3.Connection = Depends(get_db)):
     row = conn.execute(
-        "SELECT id, fund_id, 产品名称, 产品代码, 净值日期, 单位净值, 累计单位净值, 插入时间, source_id "
+        "SELECT id, fund_id, 产品名称, 产品代码, 净值日期, 单位净值, 累计单位净值, adjusted_nav, 插入时间, source_id "
         "FROM fund_nav_data WHERE id = ?",
         (nav_id,),
     ).fetchone()
@@ -1254,7 +1266,7 @@ def get_nav(nav_id: int, conn: sqlite3.Connection = Depends(get_db)):
 @app.put("/api/nav/{nav_id}", response_model=NavRecord, tags=["nav"])
 def update_nav(nav_id: int, body: NavUpdateRequest, conn: sqlite3.Connection = Depends(get_db)):
     existing = conn.execute(
-        "SELECT id, fund_id, 产品名称, 产品代码, 净值日期, 单位净值, 累计单位净值, 插入时间, source_id "
+        "SELECT id, fund_id, 产品名称, 产品代码, 净值日期, 单位净值, 累计单位净值, adjusted_nav, 插入时间, source_id "
         "FROM fund_nav_data WHERE id = ?",
         (nav_id,),
     ).fetchone()
@@ -1309,7 +1321,7 @@ def update_nav(nav_id: int, body: NavUpdateRequest, conn: sqlite3.Connection = D
     conn.commit()
 
     updated = conn.execute(
-        "SELECT id, fund_id, 产品名称, 产品代码, 净值日期, 单位净值, 累计单位净值, 插入时间, source_id "
+        "SELECT id, fund_id, 产品名称, 产品代码, 净值日期, 单位净值, 累计单位净值, adjusted_nav, 插入时间, source_id "
         "FROM fund_nav_data WHERE id = ?",
         (nav_id,),
     ).fetchone()
