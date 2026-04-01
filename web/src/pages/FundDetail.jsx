@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { fetchFund, fetchFundNav, fetchFundIssues, fetchIndexDaily, subtractDays, setFundBenchmark } from '../api.js'
 import { computeMetrics } from '../utils/metrics.js'
-import ChartTab, { BENCHMARK_OPTIONS } from './fund-detail/ChartTab.jsx'
+import ChartTab from './fund-detail/ChartTab.jsx'
 import MetricsTab from './fund-detail/MetricsTab.jsx'
 import PerformanceTab from './fund-detail/PerformanceTab.jsx'
 
@@ -37,7 +37,7 @@ export default function FundDetail() {
   const [retryCount, setRetryCount] = useState(0)
 
   // View state
-  const [activeTab, setActiveTab] = useState('chart')
+  const [activeSection, setActiveSection] = useState('chart')
   const [activeDays, setActiveDays] = useState(0)
   const [navType, setNavType] = useState('unit')
 
@@ -163,8 +163,8 @@ export default function FundDetail() {
     const baseBenchVal = firstBenchClose
     if (!baseFundVal || !baseBenchVal) return null
 
-    // normalizeBase: 1 in return mode, 100 otherwise (归一到1 vs 归一到100)
-    const normalizeBase = navType === 'return' ? 1 : 100
+    // normalizeBase: always 1 (归一到1，统一显示收益率)
+    const normalizeBase = 1
 
     const labels = []
     const fundNorm = []
@@ -233,6 +233,23 @@ export default function FundDetail() {
   }, [fund])
 
   const onRetry = useCallback(() => setRetryCount(c => c + 1), [])
+
+  // ── Scrollspy ──
+  useEffect(() => {
+    const navOffset = 160
+    const handleScroll = () => {
+      const scrollTop = window.scrollY + navOffset
+      let current = TABS[0].key
+      for (const tab of TABS) {
+        const el = document.getElementById(`section-${tab.key}`)
+        if (el && el.offsetTop <= scrollTop) current = tab.key
+      }
+      setActiveSection(current)
+    }
+    window.addEventListener('scroll', handleScroll, { passive: true })
+    handleScroll()
+    return () => window.removeEventListener('scroll', handleScroll)
+  }, [])
 
   // ── Error state ──
   if (error) {
@@ -352,30 +369,11 @@ export default function FundDetail() {
           </div>
         )}
 
-        {/* ── Tab navigation ── */}
-        <div className="bg-white rounded-xl shadow">
-          <div className="flex border-b border-gray-200">
-            {TABS.map(tab => (
-              <button
-                key={tab.key}
-                onClick={() => setActiveTab(tab.key)}
-                className={`px-4 py-3 md:px-6 text-sm font-medium transition-colors relative ${
-                  activeTab === tab.key
-                    ? 'text-blue-600'
-                    : 'text-gray-500 hover:text-gray-700'
-                }`}
-              >
-                {tab.label}
-                {activeTab === tab.key && (
-                  <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-blue-600 rounded-t" />
-                )}
-              </button>
-            ))}
-          </div>
-        </div>
+        {/* ── Scrollspy nav ── */}
+        <ScrollspyNav activeSection={activeSection} />
 
-        {/* ── Tab content ── */}
-        {activeTab === 'chart' && (
+        {/* ── Scrollable sections ── */}
+        <SectionAnchor id="chart">
           <ChartTab
             fund={fund}
             navItems={navItems}
@@ -400,9 +398,9 @@ export default function FundDetail() {
             customTo={customTo}
             setCustomTo={setCustomTo}
           />
-        )}
+        </SectionAnchor>
 
-        {activeTab === 'metrics' && (
+        <SectionAnchor id="metrics">
           <MetricsTab
             navItems={navItems}
             filteredItems={filteredItems}
@@ -411,15 +409,15 @@ export default function FundDetail() {
             normalizedData={normalizedData}
             benchmarkItems={benchmarkItems}
           />
-        )}
+        </SectionAnchor>
 
-        {activeTab === 'performance' && (
+        <SectionAnchor id="performance">
           <PerformanceTab
             navItems={navItems}
             filteredItems={filteredItems}
             navType={navType}
           />
-        )}
+        </SectionAnchor>
       </main>
     </div>
   )
@@ -430,6 +428,46 @@ function HeroStat({ label, value, valueClass }) {
     <div>
       <p className="text-xs text-gray-500 mb-0.5 whitespace-nowrap">{label}</p>
       <p className={`text-sm font-semibold font-mono ${valueClass || 'text-gray-900'}`}>{value}</p>
+    </div>
+  )
+}
+
+function ScrollspyNav({ activeSection }) {
+  const scrollTo = (key) => {
+    const el = document.getElementById(`section-${key}`)
+    if (!el) return
+    const offset = 120
+    const top = el.getBoundingClientRect().top + window.scrollY - offset
+    window.scrollTo({ top, behavior: 'smooth' })
+  }
+  return (
+    <div className="bg-white rounded-xl shadow sticky top-[calc(3.5rem+1px)] lg:top-[1px] z-10">
+      <div className="flex border-b border-gray-200">
+        {TABS.map(tab => (
+          <button
+            key={tab.key}
+            onClick={() => scrollTo(tab.key)}
+            className={`px-4 py-3 md:px-6 text-sm font-medium transition-colors relative ${
+              activeSection === tab.key
+                ? 'text-blue-600'
+                : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            {tab.label}
+            {activeSection === tab.key && (
+              <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-blue-600 rounded-t" />
+            )}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function SectionAnchor({ id, children }) {
+  return (
+    <div id={`section-${id}`}>
+      {children}
     </div>
   )
 }

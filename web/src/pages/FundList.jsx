@@ -5,6 +5,7 @@ import {
   fetchSyncStatus, triggerSync, fetchFailures, fetchFundReturns, fetchFundMetrics,
   fetchTags, createTag, deleteTag, assignTag, removeTag,
 } from '../api.js'
+import { useCompare } from '../context/CompareContext.jsx'
 
 const TAG_COLORS = [
   '#6366f1','#3b82f6','#10b981','#f59e0b','#ef4444',
@@ -174,6 +175,7 @@ function TagAssigner({ fundId, fundTags, allTags, onClose, onAssign, onRemove })
 // ── Main component ──
 export default function FundList() {
   const navigate = useNavigate()
+  const { compareList, toggle, remove, clear, isSelected } = useCompare()
 
   const [stats, setStats] = useState(null)
   const [funds, setFunds] = useState([])
@@ -771,6 +773,7 @@ export default function FundList() {
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="bg-slate-50 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-800">
+                  <th className="px-3 py-3 md:px-4 md:py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider w-10 text-center">对比</th>
                   <th className="px-3 py-3 md:px-6 md:py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider w-12">#</th>
                   <th
                     className="px-3 py-3 md:px-6 md:py-4 text-xs font-semibold text-slate-500 uppercase tracking-wider min-w-[260px] cursor-pointer select-none hover:text-primary"
@@ -821,9 +824,17 @@ export default function FundList() {
                           key={fund.fund_id}
                           className={`hover:bg-slate-50 dark:hover:bg-slate-800/50 cursor-pointer transition-colors ${
                             globalIdx % 2 === 1 ? 'bg-slate-50/30 dark:bg-slate-800/20' : ''
-                          }`}
+                          } ${isSelected(fund.fund_id) ? 'bg-blue-50/40 dark:bg-blue-900/10' : ''}`}
                           onClick={() => navigate(`/fund/${fund.fund_id}`)}
                         >
+                          <td className="px-3 py-3 md:px-4 md:py-4 text-center" onClick={e => e.stopPropagation()}>
+                            <input
+                              type="checkbox"
+                              checked={isSelected(fund.fund_id)}
+                              onChange={() => toggle(fund)}
+                              className="w-4 h-4 accent-blue-600 cursor-pointer"
+                            />
+                          </td>
                           <td className="px-3 py-3 md:px-6 md:py-4 text-sm text-slate-400">
                             {String(globalIdx + 1).padStart(2, '0')}
                           </td>
@@ -926,7 +937,7 @@ export default function FundList() {
                 }
                 {!loading && filtered.length === 0 && (
                   <tr>
-                    <td colSpan={5 + visibleCols.size + 2} className="px-6 py-12 text-center text-slate-400">
+                    <td colSpan={6 + visibleCols.size + 2} className="px-6 py-12 text-center text-slate-400">
                       {error ? '请点击上方"重试"按钮重新加载' : '没有匹配的基金'}
                     </td>
                   </tr>
@@ -1015,6 +1026,54 @@ export default function FundList() {
           </div>
         </div>
       </div>
+
+      {/* ─── Compare float panel ─── */}
+      {compareList.length > 0 && (
+        <ComparePanel
+          compareList={compareList}
+          onRemove={remove}
+          onClear={clear}
+          onCompare={() => navigate('/compare/v2')}
+        />
+      )}
     </>
+  )
+}
+
+function ComparePanel({ compareList, onRemove, onClear, onCompare }) {
+  return (
+    <div className="fixed bottom-6 right-6 z-50 w-72 bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 flex flex-col overflow-hidden">
+      <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between">
+        <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">
+          已选 {compareList.length} / 8 只基金
+        </span>
+      </div>
+      <div className="px-4 py-2 space-y-1.5 max-h-52 overflow-y-auto custom-scrollbar">
+        {compareList.map(f => (
+          <div key={f.fund_id} className="flex items-center gap-2">
+            <span className="flex-1 text-xs text-slate-700 dark:text-slate-300 truncate">{f.product_name}</span>
+            <button
+              onClick={() => onRemove(f.fund_id)}
+              className="shrink-0 text-slate-300 hover:text-rose-500 transition-colors text-base leading-none"
+            >×</button>
+          </div>
+        ))}
+      </div>
+      <div className="px-4 py-3 border-t border-slate-100 dark:border-slate-800 flex items-center gap-2">
+        <button
+          onClick={onClear}
+          className="flex-1 py-2 text-xs text-slate-500 hover:text-rose-500 border border-slate-200 dark:border-slate-700 rounded-lg transition-colors"
+        >
+          清空
+        </button>
+        <button
+          onClick={onCompare}
+          disabled={compareList.length < 2}
+          className="flex-1 py-2 text-xs bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors font-medium"
+        >
+          基金对比
+        </button>
+      </div>
+    </div>
   )
 }

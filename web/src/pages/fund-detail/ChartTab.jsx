@@ -260,11 +260,17 @@ export default function ChartTab({
       const base = filteredItems.length > 0 ? (filteredItems[0].unit_nav || 1) : 1
       values = filteredItems.map(i => i.unit_nav / base)
     } else if (navType === 'adjusted') {
-      values = filteredItems.map(i => i.adjusted_nav ?? i.unit_nav)
+      const raw = filteredItems.map(i => i.adjusted_nav ?? i.unit_nav)
+      const base = raw[0] || 1
+      values = raw.map(v => v / base)
+    } else if (navType === 'accumulated') {
+      const raw = filteredItems.map(i => i.accumulated_nav ?? i.unit_nav)
+      const base = raw[0] || 1
+      values = raw.map(v => v / base)
     } else {
-      values = filteredItems.map(i =>
-        navType === 'unit' ? i.unit_nav : (i.accumulated_nav ?? i.unit_nav)
-      )
+      // unit
+      const base = filteredItems.length > 0 ? (filteredItems[0].unit_nav || 1) : 1
+      values = filteredItems.map(i => i.unit_nav / base)
     }
     return { labels, values }
   }, [filteredItems, navType])
@@ -468,18 +474,12 @@ export default function ChartTab({
                   const pct = ((v - excessBase) / excessBase * 100).toFixed(2)
                   return `${item.dataset.label}: ${pct >= 0 ? '+' : ''}${pct}%`
                 }
-                if (navType === 'return') {
-                  const sign = v >= 1 ? '+' : ''
-                  return `${item.dataset.label}: ${sign}${((v - 1) * 100).toFixed(2)}%`
-                }
-                return `${item.dataset.label}: ${v.toFixed(2)}`
-              }
-              if (navType === 'return') {
-                const v = Number(item.raw)
                 const sign = v >= 1 ? '+' : ''
-                return `收益率: ${sign}${((v - 1) * 100).toFixed(2)}%`
+                return `${item.dataset.label}: ${sign}${((v - 1) * 100).toFixed(2)}%`
               }
-              return `净值: ${Number(item.raw).toFixed(4)}`
+              const v = Number(item.raw)
+              const sign = v >= 1 ? '+' : ''
+              return `收益率: ${sign}${((v - 1) * 100).toFixed(2)}%`
             },
           },
         },
@@ -495,11 +495,8 @@ export default function ChartTab({
           grid: { color: '#f3f4f6' },
           ticks: {
             callback: v => {
-              if (navType === 'return') {
-                const pct = (Number(v) - 1) * 100
-                return (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%'
-              }
-              return isBenchmarkMode ? Number(v).toFixed(2) : Number(v).toFixed(4)
+              const pct = (Number(v) - 1) * 100
+              return (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%'
             },
             font: { size: 11 },
             color: '#9ca3af',
@@ -573,7 +570,7 @@ export default function ChartTab({
           {isBenchmarkMode && (
             <>
               <span className="text-xs text-gray-400">
-                {navType === 'return' ? '（收益率，以1为基准）' : '（净值基数=100，已归一化）'}
+                （收益率，以1为基准）
               </span>
               <div className="flex items-center gap-1 ml-1">
                 <span className="text-xs text-gray-500">超额曲线:</span>
@@ -772,55 +769,6 @@ export default function ChartTab({
           <div className="h-36 md:h-40">
             <Line data={drawdownChartData} options={drawdownOptions} />
           </div>
-        </div>
-      )}
-
-      {/* Metrics comparison table */}
-      {!loading && fundMetrics && (
-        <div className="bg-white rounded-xl shadow p-4">
-          <h3 className="text-sm font-semibold text-gray-700 mb-4">业绩指标</h3>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-gray-200 text-gray-500 text-xs">
-                  <th className="text-left py-2 pr-4 font-medium">指标</th>
-                  <th className="text-right py-2 px-4 font-medium">基金</th>
-                  {hasBench && <th className="text-right py-2 px-4 font-medium">基准</th>}
-                  {hasBench && <th className="text-right py-2 pl-4 font-medium">超额</th>}
-                </tr>
-              </thead>
-              <tbody>
-                {METRIC_DEFS.map(m => {
-                  const fundVal = fundMetrics[m.key]
-                  const benchVal = hasBench ? benchMetrics?.[m.key] : null
-                  const excess = (fundVal != null && benchVal != null && m.format === 'pct')
-                    ? fundVal - benchVal
-                    : null
-                  return (
-                    <tr key={m.key} className="border-b border-gray-50 hover:bg-gray-50">
-                      <td className="py-2 pr-4 text-gray-600 text-xs">{m.label}</td>
-                      <td className={`py-2 px-2 md:px-4 text-right font-mono text-xs ${metricColor(fundVal, m.format)}`}>
-                        {formatMetric(fundVal, m.format)}
-                      </td>
-                      {hasBench && (
-                        <td className={`py-2 px-2 md:px-4 text-right font-mono text-xs ${metricColor(benchVal, m.format)}`}>
-                          {formatMetric(benchVal, m.format)}
-                        </td>
-                      )}
-                      {hasBench && (
-                        <td className={`py-2 pl-2 md:pl-4 text-right font-mono text-xs ${metricColor(excess, 'pct')}`}>
-                          {excess != null ? formatMetric(excess, 'pct') : '—'}
-                        </td>
-                      )}
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-          <p className="text-xs text-gray-400 mt-3">
-            区间 {fundMetrics.days} 天 · 无风险利率 2.5%
-          </p>
         </div>
       )}
 
