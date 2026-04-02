@@ -189,6 +189,16 @@ def _init_db_schema():
         except Exception:
             pass  # column already exists
 
+        # Add strategy columns to funds if missing
+        try:
+            conn.execute('ALTER TABLE funds ADD COLUMN strategy_l1 TEXT DEFAULT NULL')
+        except Exception:
+            pass
+        try:
+            conn.execute('ALTER TABLE funds ADD COLUMN strategy_l2 TEXT DEFAULT NULL')
+        except Exception:
+            pass
+
     logger.info("Database schema initialised at %s", DB_PATH)
 
 
@@ -281,6 +291,13 @@ class FundDetail(FundSummary):
     latest_nav: Optional[float]
     anomalous_count: int = 0
     benchmark_index: Optional[str] = None
+    strategy_l1: Optional[str] = None
+    strategy_l2: Optional[str] = None
+
+
+class StrategyUpdateRequest(BaseModel):
+    strategy_l1: Optional[str] = None
+    strategy_l2: Optional[str] = None
 
 
 class FundIssue(BaseModel):
@@ -716,14 +733,20 @@ def get_stats(conn: sqlite3.Connection = Depends(get_db)):
 
 @app.get("/api/funds", response_model=FundListResponse, tags=["funds"])
 def list_funds(
-    tag_id: Optional[int] = Query(None),
+    strategy_l1: Optional[str] = Query(None),
+    strategy_l2: Optional[str] = Query(None),
     conn: sqlite3.Connection = Depends(get_db),
 ):
-    tag_filter = ""
-    tag_params: list = []
-    if tag_id is not None:
-        tag_filter = " WHERE f.fund_id IN (SELECT fund_id FROM fund_tag_assignments WHERE tag_id=?)"
-        tag_params = [tag_id]
+    conditions = []
+    params: list = []
+    if strategy_l1 is not None:
+        conditions.append("f.strategy_l1 = ?")
+        params.append(strategy_l1)
+    if strategy_l2 is not None:
+        conditions.append("f.strategy_l2 = ?")
+        params.append(strategy_l2)
+
+    where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
     rows = conn.execute(
         f"""
@@ -732,34 +755,20 @@ def list_funds(
             f.产品代码,
             f.产品名称,
             f.首次录入时间,
+            f.strategy_l1,
+            f.strategy_l2,
             COUNT(n.id)                                  AS record_count,
             MIN(n.净值日期)                               AS earliest_date,
             MAX(n.净值日期)                               AS latest_date,
             COUNT(CASE WHEN n.单位净值 > 5 THEN 1 END)   AS anomalous_count
         FROM funds f
         LEFT JOIN fund_nav_data n ON f.fund_id = n.fund_id
-        {tag_filter}
+        {where_clause}
         GROUP BY f.fund_id
         ORDER BY f.fund_id
         """,
-        tag_params,
+        params,
     ).fetchall()
-
-    # Build a tags map: fund_id -> list of {tag_id, tag_name}
-    tag_rows = conn.execute(
-        """
-        SELECT a.fund_id, t.tag_id, t.tag_name
-        FROM fund_tag_assignments a
-        JOIN fund_tags t ON t.tag_id = a.tag_id
-        ORDER BY a.fund_id, t.tag_id
-        """
-    ).fetchall()
-    tags_map: dict = {}
-    for tr in tag_rows:
-        fid = tr["fund_id"]
-        if fid not in tags_map:
-            tags_map[fid] = []
-        tags_map[fid].append({"tag_id": tr["tag_id"], "tag_name": tr["tag_name"]})
 
     items: List[FundDetail] = []
     for r in rows:
@@ -785,10 +794,10 @@ def list_funds(
             latest_date=db_date_to_api(r["latest_date"]),
             latest_nav=latest_nav,
             anomalous_count=r["anomalous_count"] or 0,
+            strategy_l1=r["strategy_l1"],
+            strategy_l2=r["strategy_l2"],
         )
-        d = fd.model_dump()
-        d["tags"] = tags_map.get(r["fund_id"], [])
-        items.append(d)
+        items.append(fd.model_dump())
 
     return {"total": len(items), "items": items}
 
@@ -839,7 +848,6 @@ def get_all_issues(conn: sqlite3.Connection = Depends(get_db)):
 @app.get("/api/funds/returns", tags=["funds"])
 def get_fund_returns(
     periods: str = Query("1w,1m,3m,6m", description="Comma-separated period codes: 1w,1m,3m,6m,1y,ytd,inception"),
-    tag_id: Optional[int] = Query(None),
     conn: sqlite3.Connection = Depends(get_db),
 ):
     """Return multi-period returns + sparkline for all funds in a single query."""
@@ -852,12 +860,6 @@ def get_fund_returns(
             max_days = 99999
             break
 
-    tag_filter = ""
-    tag_params: list = []
-    if tag_id is not None:
-        tag_filter = " AND n.fund_id IN (SELECT fund_id FROM fund_tag_assignments WHERE tag_id=?)"
-        tag_params = [tag_id]
-
     # Compute cutoff date
     import datetime as _dt
     today = _dt.date.today()
@@ -867,17 +869,16 @@ def get_fund_returns(
         cutoff = "19000101"
 
     rows = conn.execute(
-        f"""
+        """
         SELECT n.fund_id, n.净值日期 AS nav_date, n.单位净值 AS unit_nav
         FROM fund_nav_data n
         WHERE n.净值日期 >= ?
           AND n.单位净值 IS NOT NULL
           AND n.单位净值 > 0
           AND n.单位净值 <= 5
-          {tag_filter}
         ORDER BY n.fund_id, n.净值日期
         """,
-        [cutoff] + tag_params,
+        [cutoff],
     ).fetchall()
 
     # Group by fund_id
@@ -1035,7 +1036,6 @@ def _compute_fund_metrics(series: list) -> dict:
 @app.get("/api/funds/metrics/summary", tags=["funds"])
 def get_fund_metrics_summary(
     period: str = Query("all", description="Lookback period: all | 1y | 3y"),
-    tag_id: Optional[int] = Query(None),
     conn: sqlite3.Connection = Depends(get_db),
 ):
     """Per-fund performance metrics: annualised return/vol, max drawdown, Sharpe, monthly win rate."""
@@ -1050,24 +1050,17 @@ def get_fund_metrics_summary(
     else:
         cutoff = "19000101"
 
-    tag_filter = ""
-    tag_params: list = []
-    if tag_id is not None:
-        tag_filter = " AND n.fund_id IN (SELECT fund_id FROM fund_tag_assignments WHERE tag_id=?)"
-        tag_params = [tag_id]
-
     rows = conn.execute(
-        f"""
+        """
         SELECT n.fund_id, n.净值日期 AS nav_date, n.单位净值 AS unit_nav
         FROM fund_nav_data n
         WHERE n.净值日期 >= ?
           AND n.单位净值 IS NOT NULL
           AND n.单位净值 > 0
           AND n.单位净值 <= 5
-          {tag_filter}
         ORDER BY n.fund_id, n.净值日期
         """,
-        [cutoff] + tag_params,
+        [cutoff],
     ).fetchall()
 
     from collections import defaultdict as _dd
@@ -1104,6 +1097,22 @@ def set_fund_benchmark(
     return {"fund_id": fund_id, "benchmark_index": body.benchmark_index}
 
 
+@app.patch("/api/funds/{fund_id}/strategy", tags=["funds"])
+def set_fund_strategy(
+    fund_id: int,
+    body: StrategyUpdateRequest,
+    conn: sqlite3.Connection = Depends(get_db),
+):
+    row = conn.execute("SELECT fund_id FROM funds WHERE fund_id = ?", (fund_id,)).fetchone()
+    if not row:
+        raise NavAPIError(404, f"Fund {fund_id} not found", "NOT_FOUND")
+    conn.execute(
+        "UPDATE funds SET strategy_l1 = ?, strategy_l2 = ? WHERE fund_id = ?",
+        (body.strategy_l1, body.strategy_l2, fund_id),
+    )
+    return {"fund_id": fund_id, "strategy_l1": body.strategy_l1, "strategy_l2": body.strategy_l2}
+
+
 # --- Single fund detail -----------------------------------------------------
 
 @app.get("/api/funds/{fund_id}", response_model=FundDetail, tags=["funds"])
@@ -1112,7 +1121,7 @@ def get_fund(fund_id: int, conn: sqlite3.Connection = Depends(get_db)):
         """
         SELECT
             f.fund_id, f.产品代码, f.产品名称, f.首次录入时间,
-            f.benchmark_index,
+            f.benchmark_index, f.strategy_l1, f.strategy_l2,
             COUNT(n.id) AS record_count,
             MIN(n.净值日期) AS earliest_date,
             MAX(n.净值日期) AS latest_date
@@ -1149,6 +1158,8 @@ def get_fund(fund_id: int, conn: sqlite3.Connection = Depends(get_db)):
         latest_date=db_date_to_api(row["latest_date"]),
         latest_nav=latest_nav,
         benchmark_index=row["benchmark_index"],
+        strategy_l1=row["strategy_l1"],
+        strategy_l2=row["strategy_l2"],
     )
 
 

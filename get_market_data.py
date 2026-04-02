@@ -889,7 +889,18 @@ def connect_and_fetch_market(db_path: str) -> None:
             n_fut = sync_futures(conn, since_fut)
         else:
             logger.info("Futures data already up to date (last=%s)", last_fut)
-        _set_sync_key(conn, "market_futures_last_date", today)
+        # Only advance the checkpoint when data was actually written.
+        # If sync_futures() returned 0 (all API calls returned empty), keep
+        # last_fut so the next scheduled run retries from the same since_date
+        # instead of silently skipping the gap — this fixes the quarterly
+        # rollover hole where new contracts return no data on the first attempt.
+        if n_fut > 0:
+            _set_sync_key(conn, "market_futures_last_date", today)
+        elif since_fut <= today:
+            logger.warning(
+                "Futures sync returned 0 rows since %s — checkpoint NOT advanced, will retry next run",
+                since_fut,
+            )
 
         conn.commit()
         logger.info("Daily market sync done: %d index rows, %d futures rows", n_idx, n_fut)

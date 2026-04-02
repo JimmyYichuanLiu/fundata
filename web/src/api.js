@@ -13,9 +13,12 @@ export async function fetchStats(signal) {
   return apiFetch('/api/stats', signal)
 }
 
-export async function fetchFunds(signal, tagId) {
-  const qs = tagId != null ? `?tag_id=${tagId}` : ''
-  const data = await apiFetch(`/api/funds${qs}`, signal)
+export async function fetchFunds(signal, opts = {}) {
+  const params = new URLSearchParams()
+  if (opts.strategy_l1) params.set('strategy_l1', opts.strategy_l1)
+  if (opts.strategy_l2) params.set('strategy_l2', opts.strategy_l2)
+  const qs = params.toString()
+  const data = await apiFetch(`/api/funds${qs ? '?' + qs : ''}`, signal)
   return data.items
 }
 
@@ -165,36 +168,17 @@ export async function fetchBasisToday(symbol, signal) {
   return apiFetch(`/api/market/basis/${symbol}/today`, signal)
 }
 
-export async function fetchTags(signal) {
-  return apiFetch('/api/tags', signal)
-}
-
-export async function createTag(tagName) {
-  const res = await fetch('/api/tags', {
-    method: 'POST',
+export async function setFundStrategy(fundId, strategyL1, strategyL2) {
+  const res = await fetch(`/api/funds/${fundId}/strategy`, {
+    method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ tag_name: tagName }),
+    body: JSON.stringify({ strategy_l1: strategyL1 || null, strategy_l2: strategyL2 || null }),
   })
   if (!res.ok) {
-    const b = await res.json().catch(() => ({}))
-    throw new Error(b.detail || `HTTP ${res.status}`)
+    const body = await res.json().catch(() => ({}))
+    throw new Error(body.detail || `HTTP ${res.status}`)
   }
   return res.json()
-}
-
-export async function deleteTag(tagId) {
-  const res = await fetch(`/api/tags/${tagId}`, { method: 'DELETE' })
-  if (!res.ok && res.status !== 204) throw new Error(`HTTP ${res.status}`)
-}
-
-export async function assignTag(fundId, tagId) {
-  const res = await fetch(`/api/funds/${fundId}/tags/${tagId}`, { method: 'POST' })
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
-}
-
-export async function removeTag(fundId, tagId) {
-  const res = await fetch(`/api/funds/${fundId}/tags/${tagId}`, { method: 'DELETE' })
-  if (!res.ok && res.status !== 204) throw new Error(`HTTP ${res.status}`)
 }
 
 export async function fetchCompare(fundIds, opts = {}, signal) {
@@ -209,7 +193,6 @@ export async function fetchCompare(fundIds, opts = {}, signal) {
 export async function fetchFundReturns(opts = {}, signal) {
   const params = new URLSearchParams()
   if (opts.periods) params.set('periods', opts.periods)
-  if (opts.tag_id != null) params.set('tag_id', opts.tag_id)
   const qs = params.toString()
   return apiFetch(`/api/funds/returns${qs ? '?' + qs : ''}`, signal)
 }
@@ -217,7 +200,6 @@ export async function fetchFundReturns(opts = {}, signal) {
 export async function fetchFundMetrics(opts = {}, signal) {
   const params = new URLSearchParams()
   if (opts.period) params.set('period', opts.period)
-  if (opts.tag_id != null) params.set('tag_id', opts.tag_id)
   const qs = params.toString()
   return apiFetch(`/api/funds/metrics/summary${qs ? '?' + qs : ''}`, signal)
 }

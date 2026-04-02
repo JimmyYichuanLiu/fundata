@@ -1,4 +1,5 @@
 import { useState, useRef, useMemo, useCallback } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -153,10 +154,12 @@ export default function ChartTab({
   setCustomFrom,
   customTo,
   setCustomTo,
+  excessMode,
+  setExcessMode,
 }) {
+  const navigate = useNavigate()
   const chartRef = useRef(null)
   const [gradient, setGradient] = useState(null)
-  const [excessMode, setExcessMode] = useState('off') // 'off' | 'arithmetic' | 'geometric'
 
   const [showNavForm, setShowNavForm] = useState(false)
   const [navForm, setNavForm] = useState({ nav_date: '', unit_nav: '', accumulated_nav: '' })
@@ -553,49 +556,6 @@ export default function ChartTab({
     <div className="space-y-4">
       {/* Chart panel */}
       <div className="bg-white rounded-xl shadow p-4">
-        {/* Benchmark selector + excess toggle row */}
-        <div className="flex flex-wrap items-center gap-2 mb-3">
-          <label className="text-xs text-gray-500 shrink-0">基准指数:</label>
-          <select
-            value={benchmarkCode || ''}
-            onChange={e => setBenchmarkCode(e.target.value || null)}
-            className="text-xs border border-gray-200 rounded px-2 py-1 text-gray-700 focus:outline-none focus:ring-1 focus:ring-blue-500"
-          >
-            {BENCHMARK_OPTIONS.map(opt => (
-              <option key={opt.label} value={opt.code || ''}>
-                {opt.label}
-              </option>
-            ))}
-          </select>
-          {isBenchmarkMode && (
-            <>
-              <span className="text-xs text-gray-400">
-                （收益率，以1为基准）
-              </span>
-              <div className="flex items-center gap-1 ml-1">
-                <span className="text-xs text-gray-500">超额曲线:</span>
-                {[
-                  { v: 'off',        label: '关' },
-                  { v: 'arithmetic', label: '算术' },
-                  { v: 'geometric',  label: '几何' },
-                ].map(opt => (
-                  <button
-                    key={opt.v}
-                    onClick={() => setExcessMode(opt.v)}
-                    className={`px-2 py-0.5 rounded-full text-xs font-medium transition-colors ${
-                      excessMode === opt.v
-                        ? 'bg-orange-500 text-white'
-                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                    }`}
-                  >
-                    {opt.label}
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
-        </div>
-
         {/* Controls row */}
         <div className="flex flex-wrap items-center gap-3 mb-4">
           <div className="flex gap-1 flex-wrap">
@@ -760,6 +720,18 @@ export default function ChartTab({
             onChange={handleScrubberChange}
           />
         )}
+
+        {/* Nav detail link */}
+        {!loading && navItems.length > 0 && fund && (
+          <div className="mt-3 flex justify-end">
+            <button
+              onClick={() => navigate(`/fund/${fund.fund_id}/nav`)}
+              className="text-xs text-blue-600 hover:text-blue-800 flex items-center gap-1 transition-colors"
+            >
+              查看净值明细 →
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Drawdown chart */}
@@ -772,8 +744,8 @@ export default function ChartTab({
         </div>
       )}
 
-      {/* Benchmark-relative metrics */}
-      {!loading && benchRelativeMetrics && (
+      {/* Benchmark-relative metrics — hidden */}
+      {false && !loading && benchRelativeMetrics && (
         <div className="bg-white rounded-xl shadow p-4">
           <h3 className="text-sm font-semibold text-gray-700 mb-4">基准对比指标</h3>
           <div className="grid grid-cols-2 md:grid-cols-5 gap-3">

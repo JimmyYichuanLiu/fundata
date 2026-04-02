@@ -487,26 +487,44 @@ def compute_adjusted_nav(conn, product_code):
     if first_null_idx == 0:
         # 从头开始：第一条的 adjusted_nav = 1.0
         adjusted = 1.0
-        unit0 = rows[0][2]
+        try:
+            unit0 = float(rows[0][2])
+        except (TypeError, ValueError):
+            return
         acc0_raw = rows[0][3]
+        try:
+            prev_acc = float(acc0_raw) if acc0_raw is not None else unit0
+        except (TypeError, ValueError):
+            prev_acc = unit0
         prev_unit = unit0
-        prev_acc  = acc0_raw if acc0_raw is not None else unit0
         updates.append((adjusted, rows[0][0]))
         start_idx = 1
     else:
         # 从上一条已算好的行衔接
         last = rows[first_null_idx - 1]
         adjusted  = last[4]
-        prev_unit = last[2]
+        try:
+            prev_unit = float(last[2])
+        except (TypeError, ValueError):
+            return
         prev_acc_raw = last[3]
-        prev_acc  = prev_acc_raw if prev_acc_raw is not None else prev_unit
+        try:
+            prev_acc = float(prev_acc_raw) if prev_acc_raw is not None else prev_unit
+        except (TypeError, ValueError):
+            prev_acc = prev_unit
         start_idx = first_null_idx
 
     for i in range(start_idx, len(rows)):
         row = rows[i]
-        unit    = row[2]
+        try:
+            unit = float(row[2])
+        except (TypeError, ValueError):
+            continue
         acc_raw = row[3]
-        acc     = acc_raw if acc_raw is not None else unit
+        try:
+            acc = float(acc_raw) if acc_raw is not None else unit
+        except (TypeError, ValueError):
+            acc = unit
 
         div_cum_curr = acc      - unit
         div_cum_prev = prev_acc - prev_unit

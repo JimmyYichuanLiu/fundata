@@ -3,14 +3,24 @@ import { useNavigate } from 'react-router-dom'
 import {
   fetchStats, fetchFunds, fetchAllIssues,
   fetchSyncStatus, triggerSync, fetchFailures, fetchFundReturns, fetchFundMetrics,
-  fetchTags, createTag, deleteTag, assignTag, removeTag,
+  setFundStrategy,
 } from '../api.js'
 import { useCompare } from '../context/CompareContext.jsx'
 
-const TAG_COLORS = [
-  '#6366f1','#3b82f6','#10b981','#f59e0b','#ef4444',
-  '#8b5cf6','#06b6d4','#f97316','#84cc16','#ec4899',
+// ── Strategy taxonomy ──
+const STRATEGY_TAXONOMY = [
+  { l1: '期货策略',   l2: ['量化期货', '主观期货'] },
+  { l1: '股票对冲',   l2: ['股票市场中性', '股票多空', '择时对冲', '股票T0'] },
+  { l1: '股票多头',   l2: ['主观多头', '300指增', '500指增', 'A500指增', '1000指增', '2000指增', '转债指增', '红利指增', '行业指增', '风格指增', '量化选股', '可转债多头', '另类多头'] },
+  { l1: '套利策略',   l2: ['股票套利', '期货套利', '期权套利', '基金套利', '可转债套利', '混合套利'] },
+  { l1: '期权策略',   l2: ['场内期权', '场外期权'] },
+  { l1: '多资产策略', l2: ['宏观策略', '复合策略'] },
+  { l1: '债券策略',   l2: ['利率债', '信用债', '债券复合'] },
+  { l1: '组合策略',   l2: ['FOF', 'MOM'] },
+  { l1: '其他',       l2: [] },
 ]
+
+const L2_MAP = Object.fromEntries(STRATEGY_TAXONOMY.map(s => [s.l1, s.l2]))
 
 const PAGE_SIZE = 20
 
@@ -47,10 +57,111 @@ function saveVisibleCols(set) {
 }
 
 function tagColor(tagId) {
-  return TAG_COLORS[tagId % TAG_COLORS.length]
+  const COLORS = ['#6366f1','#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#f97316','#84cc16','#ec4899']
+  return COLORS[tagId % COLORS.length]
 }
 
-// ── Skeleton row for loading state ──
+// ── Strategy color by L1 ──
+const L1_COLORS = {
+  '期货策略':   { bg: '#fef3c7', text: '#92400e', border: '#fbbf24' },
+  '股票对冲':   { bg: '#dbeafe', text: '#1e40af', border: '#60a5fa' },
+  '股票多头':   { bg: '#fee2e2', text: '#991b1b', border: '#f87171' },
+  '套利策略':   { bg: '#d1fae5', text: '#065f46', border: '#34d399' },
+  '期权策略':   { bg: '#ede9fe', text: '#5b21b6', border: '#a78bfa' },
+  '多资产策略': { bg: '#fce7f3', text: '#9d174d', border: '#f472b6' },
+  '债券策略':   { bg: '#e0f2fe', text: '#0c4a6e', border: '#38bdf8' },
+  '组合策略':   { bg: '#f0fdf4', text: '#14532d', border: '#4ade80' },
+  '其他':       { bg: '#f1f5f9', text: '#475569', border: '#94a3b8' },
+}
+
+function strategyColor(l1) {
+  return L1_COLORS[l1] || { bg: '#f1f5f9', text: '#475569', border: '#94a3b8' }
+}
+
+// ── Strategy Assigner floating panel ──
+function StrategyAssigner({ fund, onClose, onSave }) {
+  const [selL1, setSelL1] = useState(fund.strategy_l1 || '')
+  const [selL2, setSelL2] = useState(fund.strategy_l2 || '')
+  const [saving, setSaving] = useState(false)
+
+  const l2Options = selL1 ? (L2_MAP[selL1] || []) : []
+
+  function handleL1(v) {
+    setSelL1(v)
+    setSelL2('')
+  }
+
+  async function handleSave() {
+    setSaving(true)
+    try {
+      await onSave(fund.fund_id, selL1 || null, selL2 || null)
+      onClose()
+    } catch {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div
+      className="absolute z-50 bg-white dark:bg-slate-800 rounded-xl shadow-xl border border-slate-200 dark:border-slate-700 p-3 w-64"
+      onClick={e => e.stopPropagation()}
+    >
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-xs font-semibold text-slate-600 dark:text-slate-300">策略分类</span>
+        <button onClick={onClose} className="text-slate-400 hover:text-slate-600 text-base leading-none">×</button>
+      </div>
+      <div className="mb-2">
+        <p className="text-[10px] text-slate-400 mb-1">一级策略</p>
+        <div className="flex flex-wrap gap-1">
+          {STRATEGY_TAXONOMY.map(s => {
+            const c = strategyColor(s.l1)
+            const active = selL1 === s.l1
+            return (
+              <button
+                key={s.l1}
+                onClick={() => handleL1(s.l1)}
+                className="px-2 py-0.5 rounded text-[11px] font-medium border transition-colors"
+                style={active
+                  ? { backgroundColor: c.border, color: '#fff', borderColor: c.border }
+                  : { backgroundColor: c.bg, color: c.text, borderColor: c.border }
+                }
+              >{s.l1}</button>
+            )
+          })}
+          {selL1 && (
+            <button
+              onClick={() => { setSelL1(''); setSelL2('') }}
+              className="px-2 py-0.5 rounded text-[11px] border border-slate-200 text-slate-400 hover:text-rose-500"
+            >清除</button>
+          )}
+        </div>
+      </div>
+      {l2Options.length > 0 && (
+        <div className="mb-3">
+          <p className="text-[10px] text-slate-400 mb-1">二级策略</p>
+          <div className="flex flex-wrap gap-1">
+            {l2Options.map(l2 => (
+              <button
+                key={l2}
+                onClick={() => setSelL2(selL2 === l2 ? '' : l2)}
+                className={`px-2 py-0.5 rounded text-[11px] border transition-colors ${
+                  selL2 === l2
+                    ? 'bg-slate-700 text-white border-slate-700'
+                    : 'bg-slate-50 text-slate-600 border-slate-200 hover:border-slate-400'
+                }`}
+              >{l2}</button>
+            ))}
+          </div>
+        </div>
+      )}
+      <button
+        onClick={handleSave}
+        disabled={saving}
+        className="w-full mt-1 py-1.5 bg-primary text-white text-xs rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+      >{saving ? '保存…' : '确认'}</button>
+    </div>
+  )
+}
 function SkeletonRow() {
   return (
     <tr>
@@ -133,46 +244,7 @@ function buildTooltip(issue) {
   return lines.join('\n')
 }
 
-// ── Tag Assigner floating panel ──
-function TagAssigner({ fundId, fundTags, allTags, onClose, onAssign, onRemove }) {
-  const assigned = new Set((fundTags || []).map(t => t.tag_id))
-  return (
-    <div
-      className="absolute z-50 bg-white dark:bg-slate-800 rounded-xl shadow-xl border border-slate-200 dark:border-slate-700 p-3 min-w-[160px]"
-      onClick={e => e.stopPropagation()}
-    >
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-xs font-semibold text-slate-600 dark:text-slate-300">分配标签</span>
-        <button onClick={onClose} className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-base leading-none">×</button>
-      </div>
-      {allTags.length === 0 ? (
-        <p className="text-xs text-slate-400 py-1">暂无标签，请先创建</p>
-      ) : (
-        <div className="space-y-1">
-          {allTags.map(tag => {
-            const has = assigned.has(tag.tag_id)
-            return (
-              <button
-                key={tag.tag_id}
-                className={`flex items-center gap-2 w-full text-left px-2 py-1.5 rounded text-xs hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors ${has ? 'font-medium' : ''}`}
-                onClick={() => has ? onRemove(fundId, tag.tag_id) : onAssign(fundId, tag.tag_id)}
-              >
-                <span
-                  className="w-3 h-3 rounded-full border-2 flex-shrink-0"
-                  style={{ borderColor: tagColor(tag.tag_id), backgroundColor: has ? tagColor(tag.tag_id) : 'transparent' }}
-                />
-                <span style={{ color: has ? tagColor(tag.tag_id) : undefined }}>{tag.tag_name}</span>
-                {has && <span className="ml-auto text-slate-400">✓</span>}
-              </button>
-            )
-          })}
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── Main component ──
+// ── Skeleton row for loading state ──
 export default function FundList() {
   const navigate = useNavigate()
   const { compareList, toggle, remove, clear, isSelected } = useCompare()
@@ -192,13 +264,12 @@ export default function FundList() {
   const [showFailures, setShowFailures] = useState(false)
   const [page, setPage] = useState(1)
 
-  // Tag state
-  const [allTags, setAllTags] = useState([])
-  const [activeTagId, setActiveTagId] = useState(null)
-  const [tagInput, setTagInput] = useState('')
-  const [tagPanel, setTagPanel] = useState(false)
-  const [tagAssigner, setTagAssigner] = useState(null)
-  const [tagLoading, setTagLoading] = useState(false)
+  // Strategy filter state
+  const [activeL1, setActiveL1] = useState(null)
+  const [activeL2, setActiveL2] = useState(null)
+
+  // Strategy assigner state
+  const [stratAssigner, setStratAssigner] = useState(null) // { fundId }
 
   const syncPollRef = useRef(null)
 
@@ -210,11 +281,6 @@ export default function FundList() {
   const [fundMetrics, setFundMetrics] = useState({})
   const colPickerRef = useRef(null)
 
-  // ── Load tags ──
-  const loadTags = useCallback(() => {
-    fetchTags().then(data => setAllTags(data.items || [])).catch(() => {})
-  }, [])
-
   // ── Load funds, stats, issues, returns, and sync status ──
   useEffect(() => {
     const controller = new AbortController()
@@ -223,7 +289,7 @@ export default function FundList() {
     setError(null)
     setLoading(true)
 
-    Promise.all([fetchStats(signal), fetchFunds(signal, activeTagId)])
+    Promise.all([fetchStats(signal), fetchFunds(signal)])
       .then(([s, items]) => {
         setStats(s)
         setFunds(items)
@@ -237,10 +303,7 @@ export default function FundList() {
 
     const neededPeriods = RETURN_PERIOD_KEYS.filter(k => visibleCols.has(k))
     const periodsStr = neededPeriods.length > 0 ? neededPeriods.join(',') : '1w,1m,3m'
-    fetchFundReturns(
-      { periods: periodsStr, tag_id: activeTagId },
-      signal,
-    )
+    fetchFundReturns({ periods: periodsStr }, signal)
       .then(data => setFundReturns(data.items || {}))
       .catch(err => { if (err.name !== 'AbortError') console.warn('returns load failed', err) })
 
@@ -263,18 +326,18 @@ export default function FundList() {
       .catch(err => { if (err.name !== 'AbortError') console.warn('failures load failed', err) })
 
     return () => controller.abort()
-  }, [retryCount, activeTagId, visibleCols])
+  }, [retryCount, visibleCols])
 
   // ── Fetch metrics when any metrics column is visible ──
   useEffect(() => {
     const needsMetrics = COLUMN_DEFS.some(c => c.category === 'metrics' && visibleCols.has(c.key))
     if (!needsMetrics) return
     const controller = new AbortController()
-    fetchFundMetrics({ period: 'all', tag_id: activeTagId }, controller.signal)
+    fetchFundMetrics({ period: 'all' }, controller.signal)
       .then(data => setFundMetrics(data.items || {}))
       .catch(err => { if (err.name !== 'AbortError') console.warn('metrics load failed', err) })
     return () => controller.abort()
-  }, [visibleCols, activeTagId])
+  }, [visibleCols])
 
   // ── Close col picker on outside click ──
   useEffect(() => {
@@ -286,8 +349,13 @@ export default function FundList() {
     return () => document.removeEventListener('mousedown', handler)
   }, [showColPicker])
 
-  useEffect(() => { loadTags() }, [loadTags])
-
+  // ── Close strategy assigner on outside click ──
+  useEffect(() => {
+    if (!stratAssigner) return
+    const handler = () => setStratAssigner(null)
+    document.addEventListener('click', handler)
+    return () => document.removeEventListener('click', handler)
+  }, [stratAssigner])
   // ── Debounce search ──
   useEffect(() => {
     const t = setTimeout(() => {
@@ -302,13 +370,6 @@ export default function FundList() {
       if (syncPollRef.current) clearTimeout(syncPollRef.current)
     }
   }, [])
-
-  useEffect(() => {
-    if (!tagAssigner) return
-    const handler = () => setTagAssigner(null)
-    document.addEventListener('click', handler)
-    return () => document.removeEventListener('click', handler)
-  }, [tagAssigner])
 
   const handleSearchChange = useCallback((e) => setSearch(e.target.value), [])
 
@@ -346,65 +407,17 @@ export default function FundList() {
     }
   }, [syncing])
 
-  // ── Tag handlers ──
-  const handleCreateTag = useCallback(async () => {
-    const name = tagInput.trim()
-    if (!name) return
-    setTagLoading(true)
-    try {
-      await createTag(name)
-      setTagInput('')
-      loadTags()
-    } catch (err) {
-      alert(err.message)
-    } finally {
-      setTagLoading(false)
-    }
-  }, [tagInput, loadTags])
-
-  const handleDeleteTag = useCallback(async (tagId) => {
-    if (!window.confirm('删除该标签？已分配给基金的标签也会一并移除。')) return
-    try {
-      await deleteTag(tagId)
-      if (activeTagId === tagId) setActiveTagId(null)
-      loadTags()
-      setRetryCount(c => c + 1)
-    } catch (err) {
-      alert(err.message)
-    }
-  }, [activeTagId, loadTags])
-
-  const handleAssignTag = useCallback(async (fundId, tagId) => {
-    try {
-      await assignTag(fundId, tagId)
-      setFunds(prev => prev.map(f => {
-        if (f.fund_id !== fundId) return f
-        const tag = allTags.find(t => t.tag_id === tagId)
-        if (!tag) return f
-        const tags = f.tags || []
-        if (tags.some(t => t.tag_id === tagId)) return f
-        return { ...f, tags: [...tags, tag] }
-      }))
-    } catch (err) {
-      alert(err.message)
-    }
-  }, [allTags])
-
-  const handleRemoveTag = useCallback(async (fundId, tagId) => {
-    try {
-      await removeTag(fundId, tagId)
-      setFunds(prev => prev.map(f => {
-        if (f.fund_id !== fundId) return f
-        return { ...f, tags: (f.tags || []).filter(t => t.tag_id !== tagId) }
-      }))
-    } catch (err) {
-      alert(err.message)
-    }
+  // ── Strategy assignment handler ──
+  const handleSaveStrategy = useCallback(async (fundId, l1, l2) => {
+    await setFundStrategy(fundId, l1, l2)
+    setFunds(prev => prev.map(f =>
+      f.fund_id === fundId ? { ...f, strategy_l1: l1, strategy_l2: l2 } : f
+    ))
   }, [])
 
-  const openTagAssigner = useCallback((e, fundId) => {
+  const openStratAssigner = useCallback((e, fundId) => {
     e.stopPropagation()
-    setTagAssigner(prev => prev?.fundId === fundId ? null : { fundId })
+    setStratAssigner(prev => prev?.fundId === fundId ? null : { fundId })
   }, [])
 
   // ── Sort handler ──
@@ -433,12 +446,19 @@ export default function FundList() {
 
   // ── Filtered & sorted & paginated data ──
   const filtered = useMemo(() => {
-    const base = debouncedSearch
-      ? funds.filter(f =>
-          (f.product_name || '').includes(debouncedSearch) ||
-          (f.product_code || '').includes(debouncedSearch)
-        )
-      : funds
+    let base = funds
+    if (debouncedSearch) {
+      base = base.filter(f =>
+        (f.product_name || '').includes(debouncedSearch) ||
+        (f.product_code || '').includes(debouncedSearch)
+      )
+    }
+    if (activeL1) {
+      base = base.filter(f => f.strategy_l1 === activeL1)
+    }
+    if (activeL2) {
+      base = base.filter(f => f.strategy_l2 === activeL2)
+    }
     return [...base].sort((a, b) => {
       const ret_a = fundReturns[a.fund_id]
       const ret_b = fundReturns[b.fund_id]
@@ -479,7 +499,7 @@ export default function FundList() {
       }
       return 0
     })
-  }, [funds, debouncedSearch, sortKey, sortDir, fundReturns, fundMetrics])
+  }, [funds, debouncedSearch, sortKey, sortDir, fundReturns, fundMetrics, activeL1, activeL2])
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
   const currentPage = Math.min(page, totalPages)
@@ -632,140 +652,118 @@ export default function FundList() {
           </div>
         )}
 
-        {/* ─── Filters & Search ─── */}
-        <div className="flex flex-col md:flex-row md:items-center justify-between mb-6 gap-4">
+        {/* ─── Strategy Filter ─── */}
+        <div className="mb-4 space-y-2">
+          {/* 一级策略 */}
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-sm font-medium text-slate-500 mr-2">标签筛选:</span>
+            <span className="text-sm font-medium text-slate-500 w-16 shrink-0">一级策略：</span>
             <button
-              onClick={() => { setActiveTagId(null); setPage(1) }}
-              className={`px-4 py-1.5 rounded-full text-sm font-medium shadow-sm transition-colors ${
-                activeTagId === null
-                  ? 'bg-primary text-white'
-                  : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700'
+              onClick={() => { setActiveL1(null); setActiveL2(null); setPage(1) }}
+              className={`px-3 py-1 rounded text-sm font-medium transition-colors ${
+                activeL1 === null
+                  ? 'bg-rose-100 text-rose-600 border border-rose-300'
+                  : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'
               }`}
-            >
-              全部
-            </button>
-            {allTags.map(tag => (
+            >不限</button>
+            {STRATEGY_TAXONOMY.map(s => {
+              const c = strategyColor(s.l1)
+              const active = activeL1 === s.l1
+              return (
+                <button
+                  key={s.l1}
+                  onClick={() => {
+                    if (active) { setActiveL1(null); setActiveL2(null) }
+                    else { setActiveL1(s.l1); setActiveL2(null) }
+                    setPage(1)
+                  }}
+                  className="px-3 py-1 rounded text-sm font-medium transition-colors flex items-center gap-1"
+                  style={active
+                    ? { backgroundColor: c.bg, color: c.text, border: `1px solid ${c.border}` }
+                    : { color: '#64748b' }
+                  }
+                >
+                  {s.l1}
+                  {active && (
+                    <span className="text-xs leading-none" style={{ color: c.text }}>×</span>
+                  )}
+                </button>
+              )
+            })}
+          </div>
+
+          {/* 二级策略 — only shown when L1 is selected and has sub-categories */}
+          {activeL1 && L2_MAP[activeL1]?.length > 0 && (
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-sm font-medium text-slate-500 w-16 shrink-0">二级策略：</span>
               <button
-                key={tag.tag_id}
-                onClick={() => { setActiveTagId(activeTagId === tag.tag_id ? null : tag.tag_id); setPage(1) }}
-                className={`px-4 py-1.5 rounded-full text-sm font-medium shadow-sm transition-colors border ${
-                  activeTagId === tag.tag_id ? 'text-white' : 'bg-white dark:bg-slate-800'
+                onClick={() => { setActiveL2(null); setPage(1) }}
+                className={`px-3 py-1 rounded text-sm font-medium transition-colors ${
+                  activeL2 === null
+                    ? 'bg-rose-100 text-rose-600 border border-rose-300'
+                    : 'text-slate-500 hover:text-slate-700 dark:text-slate-400'
                 }`}
-                style={
-                  activeTagId === tag.tag_id
-                    ? { backgroundColor: tagColor(tag.tag_id), borderColor: tagColor(tag.tag_id) }
-                    : { color: tagColor(tag.tag_id), borderColor: tagColor(tag.tag_id) + '88' }
-                }
-              >
-                {tag.tag_name}
-              </button>
-            ))}
-            <button
-              onClick={() => setTagPanel(v => !v)}
-              className="w-8 h-8 flex items-center justify-center text-slate-400 hover:text-primary transition-colors"
-              title="管理标签"
-            >
-              <span className="material-symbols-outlined">settings_suggest</span>
-            </button>
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="relative group">
-              <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-primary transition-colors">search</span>
-              <input
-                type="text"
-                value={search}
-                onChange={handleSearchChange}
-                placeholder="搜索基金名称或代码…"
-                className="pl-10 pr-4 py-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-sm focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none w-full md:w-64 transition-all"
-              />
+              >不限</button>
+              {L2_MAP[activeL1].map(l2 => (
+                <button
+                  key={l2}
+                  onClick={() => { setActiveL2(activeL2 === l2 ? null : l2); setPage(1) }}
+                  className={`px-3 py-1 rounded text-sm font-medium transition-colors ${
+                    activeL2 === l2
+                      ? 'bg-slate-700 text-white'
+                      : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'
+                  }`}
+                >{l2}</button>
+              ))}
             </div>
-            {/* Column visibility picker */}
-            <div className="relative" ref={colPickerRef}>
-              <button
-                onClick={() => setShowColPicker(v => !v)}
-                className={`w-9 h-9 flex items-center justify-center rounded-lg border transition-colors ${showColPicker ? 'bg-primary text-white border-primary' : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500 hover:text-primary'}`}
-                title="显示/隐藏列"
-              >
-                <span className="material-symbols-outlined text-[18px]">view_column</span>
-              </button>
-              {showColPicker && (
-                <div className="absolute right-0 top-10 z-50 bg-white dark:bg-slate-900 rounded-xl shadow-xl border border-slate-200 dark:border-slate-700 p-3 w-52">
-                  <p className="text-xs font-semibold text-slate-500 mb-2 uppercase tracking-wider">可见列</p>
-                  <div className="space-y-0.5">
-                    {['return', 'metrics'].map(cat => (
-                      <div key={cat}>
-                        <p className="text-[10px] font-medium text-slate-400 mt-2 mb-1 uppercase">{cat === 'return' ? '收益率' : '业绩指标'}</p>
-                        {COLUMN_DEFS.filter(c => c.category === cat).map(col => (
-                          <label key={col.key} className="flex items-center gap-2 px-1 py-1 rounded cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800">
-                            <input
-                              type="checkbox"
-                              checked={visibleCols.has(col.key)}
-                              onChange={() => toggleCol(col.key)}
-                              className="w-3.5 h-3.5 accent-primary"
-                            />
-                            <span className="text-xs text-slate-700 dark:text-slate-200">{col.label}</span>
-                          </label>
-                        ))}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
+          )}
         </div>
 
-        {/* Tag management panel */}
-        {tagPanel && (
-          <div className="mb-6 bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-4">
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">标签管理</span>
-              <button onClick={() => setTagPanel(false)} className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200">
-                <span className="material-symbols-outlined text-[18px]">close</span>
-              </button>
-            </div>
-            <div className="flex flex-wrap gap-2 mb-3">
-              {allTags.map(tag => (
-                <span
-                  key={tag.tag_id}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium"
-                  style={{ backgroundColor: tagColor(tag.tag_id) + '22', color: tagColor(tag.tag_id), border: `1px solid ${tagColor(tag.tag_id)}55` }}
-                >
-                  {tag.tag_name}
-                  <button
-                    onClick={() => handleDeleteTag(tag.tag_id)}
-                    className="hover:opacity-60 ml-0.5"
-                    title="删除标签"
-                  >
-                    ×
-                  </button>
-                </span>
-              ))}
-              {allTags.length === 0 && (
-                <span className="text-xs text-slate-400">暂无标签</span>
-              )}
-            </div>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={tagInput}
-                onChange={e => setTagInput(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && handleCreateTag()}
-                placeholder="新标签名称…"
-                className="px-3 py-1.5 border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary flex-1 max-w-[200px]"
-              />
-              <button
-                onClick={handleCreateTag}
-                disabled={tagLoading || !tagInput.trim()}
-                className="px-3 py-1.5 bg-primary text-white text-xs rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
-              >
-                {tagLoading ? '…' : '添加'}
-              </button>
-            </div>
+        {/* ─── Search & col picker ─── */}
+        <div className="flex items-center justify-end mb-4 gap-2">
+          <div className="relative group">
+            <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-primary transition-colors">search</span>
+            <input
+              type="text"
+              value={search}
+              onChange={handleSearchChange}
+              placeholder="搜索基金名称或代码…"
+              className="pl-10 pr-4 py-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-sm focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none w-full md:w-64 transition-all"
+            />
           </div>
-        )}
+          {/* Column visibility picker */}
+          <div className="relative" ref={colPickerRef}>
+            <button
+              onClick={() => setShowColPicker(v => !v)}
+              className={`w-9 h-9 flex items-center justify-center rounded-lg border transition-colors ${showColPicker ? 'bg-primary text-white border-primary' : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500 hover:text-primary'}`}
+              title="显示/隐藏列"
+            >
+              <span className="material-symbols-outlined text-[18px]">view_column</span>
+            </button>
+            {showColPicker && (
+              <div className="absolute right-0 top-10 z-50 bg-white dark:bg-slate-900 rounded-xl shadow-xl border border-slate-200 dark:border-slate-700 p-3 w-52">
+                <p className="text-xs font-semibold text-slate-500 mb-2 uppercase tracking-wider">可见列</p>
+                <div className="space-y-0.5">
+                  {['return', 'metrics'].map(cat => (
+                    <div key={cat}>
+                      <p className="text-[10px] font-medium text-slate-400 mt-2 mb-1 uppercase">{cat === 'return' ? '收益率' : '业绩指标'}</p>
+                      {COLUMN_DEFS.filter(c => c.category === cat).map(col => (
+                        <label key={col.key} className="flex items-center gap-2 px-1 py-1 rounded cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800">
+                          <input
+                            type="checkbox"
+                            checked={visibleCols.has(col.key)}
+                            onChange={() => toggleCol(col.key)}
+                            className="w-3.5 h-3.5 accent-primary"
+                          />
+                          <span className="text-xs text-slate-700 dark:text-slate-200">{col.label}</span>
+                        </label>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
 
         {/* ─── Table ─── */}
         <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
@@ -816,7 +814,7 @@ export default function FundList() {
                         ? fundIssue.anomalous.length + fundIssue.gaps.length
                         : 0
                       const hasIssue = fundIssueCount > 0
-                      const isAssigning = tagAssigner?.fundId === fund.fund_id
+                      const isAssigning = stratAssigner?.fundId === fund.fund_id
                       const globalIdx = pageStart + idx
 
                       return (
@@ -843,33 +841,31 @@ export default function FundList() {
                               <span className="font-medium text-slate-900 dark:text-white">
                                 {fund.product_name || '—'}
                               </span>
-                              <div className="flex items-center gap-1 mt-0.5" onClick={e => e.stopPropagation()}>
-                                {(fund.tags || []).map(t => (
-                                  <span
-                                    key={t.tag_id}
-                                    className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium cursor-pointer"
-                                    style={{ backgroundColor: tagColor(t.tag_id) + '22', color: tagColor(t.tag_id) }}
-                                    onClick={() => setActiveTagId(t.tag_id)}
-                                  >
-                                    {t.tag_name}
-                                  </span>
-                                ))}
-                                <button
-                                  className="w-4 h-4 rounded border border-dashed border-slate-300 dark:border-slate-600 text-slate-400 hover:border-primary hover:text-primary text-[10px] leading-none flex items-center justify-center"
-                                  onClick={e => openTagAssigner(e, fund.fund_id)}
-                                  title="添加标签"
-                                >
-                                  +
-                                </button>
+                              <div className="flex items-center gap-1 mt-0.5 relative" onClick={e => e.stopPropagation()}>
+                                {fund.strategy_l1 ? (() => {
+                                  const c = strategyColor(fund.strategy_l1)
+                                  return (
+                                    <button
+                                      className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium border"
+                                      style={{ backgroundColor: c.bg, color: c.text, borderColor: c.border }}
+                                      onClick={e => openStratAssigner(e, fund.fund_id)}
+                                    >
+                                      {fund.strategy_l1}{fund.strategy_l2 ? ` · ${fund.strategy_l2}` : ''}
+                                      <span className="ml-1 opacity-60">✎</span>
+                                    </button>
+                                  )
+                                })() : (
+                                  <button
+                                    className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] border border-dashed border-slate-300 text-slate-400 hover:border-primary hover:text-primary"
+                                    onClick={e => openStratAssigner(e, fund.fund_id)}
+                                  >+ 策略</button>
+                                )}
                                 {isAssigning && (
-                                  <div className="absolute mt-1">
-                                    <TagAssigner
-                                      fundId={fund.fund_id}
-                                      fundTags={fund.tags}
-                                      allTags={allTags}
-                                      onClose={() => setTagAssigner(null)}
-                                      onAssign={handleAssignTag}
-                                      onRemove={handleRemoveTag}
+                                  <div className="absolute top-5 left-0">
+                                    <StrategyAssigner
+                                      fund={fund}
+                                      onClose={() => setStratAssigner(null)}
+                                      onSave={handleSaveStrategy}
                                     />
                                   </div>
                                 )}
@@ -1016,11 +1012,11 @@ export default function FundList() {
           <div className="bg-white dark:bg-slate-900 p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm">
             <div className="flex items-center gap-4">
               <div className="w-12 h-12 bg-purple-50 dark:bg-purple-900/20 text-purple-600 rounded-xl flex items-center justify-center">
-                <span className="material-symbols-outlined">label</span>
+                <span className="material-symbols-outlined">category</span>
               </div>
               <div>
-                <p className="text-sm text-slate-500">标签分类</p>
-                <p className="text-2xl font-bold">{allTags.length}</p>
+                <p className="text-sm text-slate-500">已设策略</p>
+                <p className="text-2xl font-bold">{funds.filter(f => f.strategy_l1).length}</p>
               </div>
             </div>
           </div>

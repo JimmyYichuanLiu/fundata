@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import Layout from './components/Layout.jsx'
 import FundList from './pages/FundList.jsx'
 import FundDetail from './pages/FundDetail.jsx'
+import NavDetailPage from './pages/NavDetailPage.jsx'
 import MarketDashboard from './pages/MarketDashboard.jsx'
 import FundComparison from './pages/FundComparison.jsx'
 import ComparisonPage from './pages/ComparisonPage.jsx'
@@ -19,6 +20,7 @@ export default function App() {
           <Routes>
             <Route path="/" element={<FundList />} />
             <Route path="/fund/:id" element={<FundDetail />} />
+            <Route path="/fund/:id/nav" element={<NavDetailPage />} />
             <Route path="/market" element={<MarketDashboard />} />
             <Route path="/compare" element={<FundComparison />} />
             <Route path="/compare/v2" element={<ComparisonPage />} />
