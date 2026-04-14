@@ -13,9 +13,14 @@ export async function fetchStats(signal) {
   return apiFetch('/api/stats', signal)
 }
 
-export async function fetchFunds(signal, tagId) {
-  const qs = tagId != null ? `?tag_id=${tagId}` : ''
-  const data = await apiFetch(`/api/funds${qs}`, signal)
+export async function fetchFunds(signal, filters = {}) {
+  const params = new URLSearchParams()
+  if (filters.strategy1) params.set('strategy1', filters.strategy1)
+  if (filters.strategy2) params.set('strategy2', filters.strategy2)
+  if (filters.strategy3) params.set('strategy3', filters.strategy3)
+  if (filters.is_show) params.set('is_show', filters.is_show)
+  const qs = params.toString()
+  const data = await apiFetch(`/api/funds${qs ? '?' + qs : ''}`, signal)
   return data.items
 }
 
@@ -165,15 +170,11 @@ export async function fetchBasisToday(symbol, signal) {
   return apiFetch(`/api/market/basis/${symbol}/today`, signal)
 }
 
-export async function fetchTags(signal) {
-  return apiFetch('/api/tags', signal)
-}
-
-export async function createTag(tagName) {
-  const res = await fetch('/api/tags', {
-    method: 'POST',
+export async function updateFundStrategy(fundId, strategy) {
+  const res = await fetch(`/api/funds/${fundId}/strategy`, {
+    method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ tag_name: tagName }),
+    body: JSON.stringify(strategy),
   })
   if (!res.ok) {
     const b = await res.json().catch(() => ({}))
@@ -182,19 +183,14 @@ export async function createTag(tagName) {
   return res.json()
 }
 
-export async function deleteTag(tagId) {
-  const res = await fetch(`/api/tags/${tagId}`, { method: 'DELETE' })
-  if (!res.ok && res.status !== 204) throw new Error(`HTTP ${res.status}`)
-}
-
-export async function assignTag(fundId, tagId) {
-  const res = await fetch(`/api/funds/${fundId}/tags/${tagId}`, { method: 'POST' })
+export async function triggerExcelImport() {
+  const res = await fetch('/api/excel/import', { method: 'POST' })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return res.json()
 }
 
-export async function removeTag(fundId, tagId) {
-  const res = await fetch(`/api/funds/${fundId}/tags/${tagId}`, { method: 'DELETE' })
-  if (!res.ok && res.status !== 204) throw new Error(`HTTP ${res.status}`)
+export async function fetchExcelConflicts(signal) {
+  return apiFetch('/api/excel/conflicts', signal)
 }
 
 export async function fetchCompare(fundIds, opts = {}, signal) {
@@ -209,7 +205,7 @@ export async function fetchCompare(fundIds, opts = {}, signal) {
 export async function fetchFundReturns(opts = {}, signal) {
   const params = new URLSearchParams()
   if (opts.periods) params.set('periods', opts.periods)
-  if (opts.tag_id != null) params.set('tag_id', opts.tag_id)
+  if (opts.strategy1) params.set('strategy1', opts.strategy1)
   const qs = params.toString()
   return apiFetch(`/api/funds/returns${qs ? '?' + qs : ''}`, signal)
 }
@@ -217,7 +213,7 @@ export async function fetchFundReturns(opts = {}, signal) {
 export async function fetchFundMetrics(opts = {}, signal) {
   const params = new URLSearchParams()
   if (opts.period) params.set('period', opts.period)
-  if (opts.tag_id != null) params.set('tag_id', opts.tag_id)
+  if (opts.strategy1) params.set('strategy1', opts.strategy1)
   const qs = params.toString()
   return apiFetch(`/api/funds/metrics/summary${qs ? '?' + qs : ''}`, signal)
 }

@@ -167,27 +167,31 @@ def _init_db_schema():
         conn.execute('CREATE INDEX IF NOT EXISTS idx_product_code ON fund_nav_data(产品代码)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_nav_date ON fund_nav_data(净值日期)')
 
-        # Tag tables
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS fund_tags (
-                tag_id    INTEGER PRIMARY KEY AUTOINCREMENT,
-                tag_name  TEXT NOT NULL UNIQUE,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS fund_tag_assignments (
-                fund_id INTEGER NOT NULL REFERENCES funds(fund_id) ON DELETE CASCADE,
-                tag_id  INTEGER NOT NULL REFERENCES fund_tags(tag_id) ON DELETE CASCADE,
-                PRIMARY KEY (fund_id, tag_id)
-            )
-        """)
-
         # Add benchmark_index column to funds if missing
         try:
             conn.execute('ALTER TABLE funds ADD COLUMN benchmark_index TEXT DEFAULT NULL')
         except Exception:
             pass  # column already exists
+
+        # 三级策略标签字段（来自臻选货架 Excel）
+        for col in ("strategy1", "strategy2", "strategy3", "is_show", "setup_date", "start_date"):
+            try:
+                conn.execute(f'ALTER TABLE funds ADD COLUMN {col} TEXT DEFAULT NULL')
+            except Exception:
+                pass  # column already exists
+
+        # Excel 冲突记录表
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS excel_conflicts (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                产品代码    TEXT NOT NULL,
+                净值日期    TEXT NOT NULL,
+                email_unit_nav  REAL,
+                excel_unit_nav  REAL,
+                detected_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(产品代码, 净值日期)
+            )
+        """)
 
     logger.info("Database schema initialised at %s", DB_PATH)
 
@@ -281,6 +285,12 @@ class FundDetail(FundSummary):
     latest_nav: Optional[float]
     anomalous_count: int = 0
     benchmark_index: Optional[str] = None
+    strategy1: Optional[str] = None
+    strategy2: Optional[str] = None
+    strategy3: Optional[str] = None
+    is_show: Optional[str] = None
+    setup_date: Optional[str] = None
+    start_date: Optional[str] = None
 
 
 class FundIssue(BaseModel):
@@ -374,13 +384,17 @@ class CompareResponse(BaseModel):
     funds: Dict[int, FundNavSeries]
 
 
-class TagCreate(BaseModel):
-    tag_name: str
+class StrategyUpdateRequest(BaseModel):
+    strategy1: Optional[str] = None
+    strategy2: Optional[str] = None
+    strategy3: Optional[str] = None  # 逗号分隔多选
 
 
-class TagResponse(BaseModel):
-    tag_id: int
-    tag_name: str
+class ExcelImportResponse(BaseModel):
+    funds_upserted: int
+    nav_upserted: int
+    conflicts_detected: int
+    errors: List[str]
 
 
 # =============================================================================
@@ -716,14 +730,29 @@ def get_stats(conn: sqlite3.Connection = Depends(get_db)):
 
 @app.get("/api/funds", response_model=FundListResponse, tags=["funds"])
 def list_funds(
-    tag_id: Optional[int] = Query(None),
+    strategy1: Optional[str] = Query(None),
+    strategy2: Optional[str] = Query(None),
+    strategy3: Optional[str] = Query(None),
+    is_show: Optional[str] = Query(None),
     conn: sqlite3.Connection = Depends(get_db),
 ):
-    tag_filter = ""
-    tag_params: list = []
-    if tag_id is not None:
-        tag_filter = " WHERE f.fund_id IN (SELECT fund_id FROM fund_tag_assignments WHERE tag_id=?)"
-        tag_params = [tag_id]
+    conditions = []
+    params: list = []
+    if strategy1:
+        conditions.append("f.strategy1 = ?")
+        params.append(strategy1)
+    if strategy2:
+        conditions.append("f.strategy2 = ?")
+        params.append(strategy2)
+    if strategy3:
+        # 三级多选：逗号分隔存储，用 LIKE 匹配
+        conditions.append("(',' || f.strategy3 || ',') LIKE ?")
+        params.append(f"%,{strategy3},%")
+    if is_show:
+        conditions.append("f.is_show = ?")
+        params.append(is_show)
+
+    where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
     rows = conn.execute(
         f"""
@@ -732,34 +761,25 @@ def list_funds(
             f.产品代码,
             f.产品名称,
             f.首次录入时间,
+            f.benchmark_index,
+            f.strategy1,
+            f.strategy2,
+            f.strategy3,
+            f.is_show,
+            f.setup_date,
+            f.start_date,
             COUNT(n.id)                                  AS record_count,
             MIN(n.净值日期)                               AS earliest_date,
             MAX(n.净值日期)                               AS latest_date,
             COUNT(CASE WHEN n.单位净值 > 5 THEN 1 END)   AS anomalous_count
         FROM funds f
         LEFT JOIN fund_nav_data n ON f.fund_id = n.fund_id
-        {tag_filter}
+        {where_clause}
         GROUP BY f.fund_id
         ORDER BY f.fund_id
         """,
-        tag_params,
+        params,
     ).fetchall()
-
-    # Build a tags map: fund_id -> list of {tag_id, tag_name}
-    tag_rows = conn.execute(
-        """
-        SELECT a.fund_id, t.tag_id, t.tag_name
-        FROM fund_tag_assignments a
-        JOIN fund_tags t ON t.tag_id = a.tag_id
-        ORDER BY a.fund_id, t.tag_id
-        """
-    ).fetchall()
-    tags_map: dict = {}
-    for tr in tag_rows:
-        fid = tr["fund_id"]
-        if fid not in tags_map:
-            tags_map[fid] = []
-        tags_map[fid].append({"tag_id": tr["tag_id"], "tag_name": tr["tag_name"]})
 
     items: List[FundDetail] = []
     for r in rows:
@@ -785,10 +805,15 @@ def list_funds(
             latest_date=db_date_to_api(r["latest_date"]),
             latest_nav=latest_nav,
             anomalous_count=r["anomalous_count"] or 0,
+            benchmark_index=r["benchmark_index"],
+            strategy1=r["strategy1"],
+            strategy2=r["strategy2"],
+            strategy3=r["strategy3"],
+            is_show=r["is_show"],
+            setup_date=r["setup_date"],
+            start_date=r["start_date"],
         )
-        d = fd.model_dump()
-        d["tags"] = tags_map.get(r["fund_id"], [])
-        items.append(d)
+        items.append(fd.model_dump())
 
     return {"total": len(items), "items": items}
 
@@ -839,7 +864,7 @@ def get_all_issues(conn: sqlite3.Connection = Depends(get_db)):
 @app.get("/api/funds/returns", tags=["funds"])
 def get_fund_returns(
     periods: str = Query("1w,1m,3m,6m", description="Comma-separated period codes: 1w,1m,3m,6m,1y,ytd,inception"),
-    tag_id: Optional[int] = Query(None),
+    strategy1: Optional[str] = Query(None),
     conn: sqlite3.Connection = Depends(get_db),
 ):
     """Return multi-period returns + sparkline for all funds in a single query."""
@@ -852,11 +877,11 @@ def get_fund_returns(
             max_days = 99999
             break
 
-    tag_filter = ""
-    tag_params: list = []
-    if tag_id is not None:
-        tag_filter = " AND n.fund_id IN (SELECT fund_id FROM fund_tag_assignments WHERE tag_id=?)"
-        tag_params = [tag_id]
+    strat_filter = ""
+    strat_params: list = []
+    if strategy1:
+        strat_filter = " AND n.fund_id IN (SELECT fund_id FROM funds WHERE strategy1=?)"
+        strat_params = [strategy1]
 
     # Compute cutoff date
     import datetime as _dt
@@ -874,12 +899,11 @@ def get_fund_returns(
           AND n.单位净值 IS NOT NULL
           AND n.单位净值 > 0
           AND n.单位净值 <= 5
-          {tag_filter}
+          {strat_filter}
         ORDER BY n.fund_id, n.净值日期
         """,
-        [cutoff] + tag_params,
+        [cutoff] + strat_params,
     ).fetchall()
-
     # Group by fund_id
     from collections import defaultdict
     fund_data: dict = defaultdict(list)
@@ -1035,7 +1059,7 @@ def _compute_fund_metrics(series: list) -> dict:
 @app.get("/api/funds/metrics/summary", tags=["funds"])
 def get_fund_metrics_summary(
     period: str = Query("all", description="Lookback period: all | 1y | 3y"),
-    tag_id: Optional[int] = Query(None),
+    strategy1: Optional[str] = Query(None),
     conn: sqlite3.Connection = Depends(get_db),
 ):
     """Per-fund performance metrics: annualised return/vol, max drawdown, Sharpe, monthly win rate."""
@@ -1050,11 +1074,11 @@ def get_fund_metrics_summary(
     else:
         cutoff = "19000101"
 
-    tag_filter = ""
-    tag_params: list = []
-    if tag_id is not None:
-        tag_filter = " AND n.fund_id IN (SELECT fund_id FROM fund_tag_assignments WHERE tag_id=?)"
-        tag_params = [tag_id]
+    strat_filter = ""
+    strat_params: list = []
+    if strategy1:
+        strat_filter = " AND n.fund_id IN (SELECT fund_id FROM funds WHERE strategy1=?)"
+        strat_params = [strategy1]
 
     rows = conn.execute(
         f"""
@@ -1064,10 +1088,10 @@ def get_fund_metrics_summary(
           AND n.单位净值 IS NOT NULL
           AND n.单位净值 > 0
           AND n.单位净值 <= 5
-          {tag_filter}
+          {strat_filter}
         ORDER BY n.fund_id, n.净值日期
         """,
-        [cutoff] + tag_params,
+        [cutoff] + strat_params,
     ).fetchall()
 
     from collections import defaultdict as _dd
@@ -1104,6 +1128,84 @@ def set_fund_benchmark(
     return {"fund_id": fund_id, "benchmark_index": body.benchmark_index}
 
 
+# --- Strategy tag update ----------------------------------------------------
+
+@app.put("/api/funds/{fund_id}/strategy", tags=["funds"])
+def update_fund_strategy(
+    fund_id: int,
+    body: StrategyUpdateRequest,
+    conn: sqlite3.Connection = Depends(get_db),
+):
+    row = conn.execute("SELECT fund_id FROM funds WHERE fund_id = ?", (fund_id,)).fetchone()
+    if not row:
+        raise NavAPIError(404, f"Fund {fund_id} not found", "NOT_FOUND")
+    set_clauses = []
+    params = []
+    if body.strategy1 is not None:
+        set_clauses.append("strategy1 = ?")
+        params.append(body.strategy1 or None)
+    if body.strategy2 is not None:
+        set_clauses.append("strategy2 = ?")
+        params.append(body.strategy2 or None)
+    if body.strategy3 is not None:
+        set_clauses.append("strategy3 = ?")
+        params.append(body.strategy3 or None)
+    if not set_clauses:
+        return {"fund_id": fund_id}
+    params.append(fund_id)
+    conn.execute(f"UPDATE funds SET {', '.join(set_clauses)} WHERE fund_id = ?", params)
+    updated = conn.execute(
+        "SELECT strategy1, strategy2, strategy3 FROM funds WHERE fund_id = ?", (fund_id,)
+    ).fetchone()
+    return {"fund_id": fund_id, "strategy1": updated[0], "strategy2": updated[1], "strategy3": updated[2]}
+
+
+# --- Excel import -----------------------------------------------------------
+
+_excel_import_lock = threading.Lock()
+
+
+@app.post("/api/excel/import", tags=["excel"])
+def trigger_excel_import(background_tasks: BackgroundTasks):
+    if not _excel_import_lock.acquire(blocking=False):
+        return {"message": "import already running"}
+    _excel_import_lock.release()
+    background_tasks.add_task(_run_excel_import)
+    return {"message": "import started"}
+
+
+def _run_excel_import():
+    if not _excel_import_lock.acquire(blocking=False):
+        return
+    try:
+        from get_excel_data import import_excel_data
+        import_excel_data(DB_PATH)
+    except Exception as e:
+        logger.error("Excel import failed: %s", e)
+    finally:
+        _excel_import_lock.release()
+
+
+@app.get("/api/excel/conflicts", tags=["excel"])
+def get_excel_conflicts(
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    conn: sqlite3.Connection = Depends(get_db),
+):
+    try:
+        total = conn.execute("SELECT COUNT(*) FROM excel_conflicts").fetchone()[0]
+        rows = conn.execute(
+            """SELECT id, 产品代码, 净值日期, email_unit_nav, excel_unit_nav, detected_at
+               FROM excel_conflicts ORDER BY detected_at DESC LIMIT ? OFFSET ?""",
+            (limit, offset),
+        ).fetchall()
+        items = [dict(r) for r in rows]
+    except Exception:
+        total = 0
+        items = []
+    return {"total": total, "items": items}
+
+
 # --- Single fund detail -----------------------------------------------------
 
 @app.get("/api/funds/{fund_id}", response_model=FundDetail, tags=["funds"])
@@ -1112,7 +1214,8 @@ def get_fund(fund_id: int, conn: sqlite3.Connection = Depends(get_db)):
         """
         SELECT
             f.fund_id, f.产品代码, f.产品名称, f.首次录入时间,
-            f.benchmark_index,
+            f.benchmark_index, f.strategy1, f.strategy2, f.strategy3,
+            f.is_show, f.setup_date, f.start_date,
             COUNT(n.id) AS record_count,
             MIN(n.净值日期) AS earliest_date,
             MAX(n.净值日期) AS latest_date
@@ -1149,6 +1252,12 @@ def get_fund(fund_id: int, conn: sqlite3.Connection = Depends(get_db)):
         latest_date=db_date_to_api(row["latest_date"]),
         latest_nav=latest_nav,
         benchmark_index=row["benchmark_index"],
+        strategy1=row["strategy1"],
+        strategy2=row["strategy2"],
+        strategy3=row["strategy3"],
+        is_show=row["is_show"],
+        setup_date=row["setup_date"],
+        start_date=row["start_date"],
     )
 
 

@@ -3,13 +3,24 @@ import { useNavigate } from 'react-router-dom'
 import {
   fetchStats, fetchFunds, fetchAllIssues,
   fetchSyncStatus, triggerSync, fetchFailures, fetchFundReturns, fetchFundMetrics,
-  fetchTags, createTag, deleteTag, assignTag, removeTag,
+  updateFundStrategy, triggerExcelImport, fetchExcelConflicts,
 } from '../api.js'
 import { useCompare } from '../context/CompareContext.jsx'
 
-const TAG_COLORS = [
-  '#6366f1','#3b82f6','#10b981','#f59e0b','#ef4444',
-  '#8b5cf6','#06b6d4','#f97316','#84cc16','#ec4899',
+// 三级策略枚举（来自臻选货架实际数据）
+const STRATEGY1_OPTIONS = [
+  'ETF','FOF策略','主观期货','主观股票','债券','债券增强','可转债',
+  '商品套利','复合策略','复合策略-低波动','复合策略-高波动','宏观对冲策略',
+  '打板','打板+强势股','期权','股票对冲','量化期货','量化股票',
+]
+const STRATEGY2_OPTIONS = [
+  '1000指增','2000指增','300指增','500指增','A500指增','Delta中性套利',
+  '多策略FOF','量化股票中性','量化多头','套利','价值','成长','行业','全市场选股',
+]
+const STRATEGY3_OPTIONS = [
+  '0-100','T0','wind小市值','中证2000','中证500','低位板','低波动','医疗',
+  '反转','周期成长','套利系列','时序','杠杆','消费','混合对冲','港股',
+  '短线交易','精选个股','行业轮动','趋势系列','首板','高频',
 ]
 
 const PAGE_SIZE = 20
@@ -46,11 +57,120 @@ function saveVisibleCols(set) {
   try { localStorage.setItem('fundlist_visible_cols', JSON.stringify([...set])) } catch {}
 }
 
-function tagColor(tagId) {
-  return TAG_COLORS[tagId % TAG_COLORS.length]
+// ── Strategy badge ──
+function StrategyBadge({ label, color = 'slate' }) {
+  const colors = {
+    blue: 'bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300',
+    violet: 'bg-violet-50 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300',
+    slate: 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300',
+  }
+  return (
+    <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${colors[color] || colors.slate}`}>
+      {label}
+    </span>
+  )
 }
 
-// ── Skeleton row for loading state ──
+// ── Strategy editor floating panel ──
+function StrategyEditor({ fund, onClose, onSave }) {
+  const [s1, setS1] = useState(fund.strategy1 || '')
+  const [s2, setS2] = useState(fund.strategy2 || '')
+  const [s3, setS3] = useState(() => {
+    const raw = fund.strategy3 || ''
+    return new Set(raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : [])
+  })
+  const [saving, setSaving] = useState(false)
+
+  const toggleS3 = (val) => {
+    setS3(prev => {
+      const next = new Set(prev)
+      if (next.has(val)) next.delete(val)
+      else next.add(val)
+      return next
+    })
+  }
+
+  const handleSave = async () => {
+    setSaving(true)
+    try {
+      await onSave(fund.fund_id, {
+        strategy1: s1 || null,
+        strategy2: s2 || null,
+        strategy3: [...s3].join(',') || null,
+      })
+      onClose()
+    } catch (err) {
+      alert(err.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div
+      className="absolute z-50 bg-white dark:bg-slate-800 rounded-xl shadow-xl border border-slate-200 dark:border-slate-700 p-4 w-72"
+      onClick={e => e.stopPropagation()}
+    >
+      <div className="flex items-center justify-between mb-3">
+        <span className="text-xs font-semibold text-slate-600 dark:text-slate-300">策略标签</span>
+        <button onClick={onClose} className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-base leading-none">×</button>
+      </div>
+      <div className="space-y-3">
+        <div>
+          <label className="text-[10px] font-medium text-slate-500 uppercase tracking-wider">一级（单选）</label>
+          <select
+            value={s1}
+            onChange={e => setS1(e.target.value)}
+            className="mt-1 w-full text-xs border border-slate-200 dark:border-slate-600 rounded-lg px-2 py-1.5 bg-white dark:bg-slate-700 focus:outline-none focus:ring-2 focus:ring-primary/20"
+          >
+            <option value="">— 不设置 —</option>
+            {STRATEGY1_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="text-[10px] font-medium text-slate-500 uppercase tracking-wider">二级（单选）</label>
+          <select
+            value={s2}
+            onChange={e => setS2(e.target.value)}
+            className="mt-1 w-full text-xs border border-slate-200 dark:border-slate-600 rounded-lg px-2 py-1.5 bg-white dark:bg-slate-700 focus:outline-none focus:ring-2 focus:ring-primary/20"
+          >
+            <option value="">— 不设置 —</option>
+            {STRATEGY2_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="text-[10px] font-medium text-slate-500 uppercase tracking-wider">三级（多选）</label>
+          <div className="mt-1 flex flex-wrap gap-1 max-h-28 overflow-y-auto">
+            {STRATEGY3_OPTIONS.map(o => (
+              <button
+                key={o}
+                type="button"
+                onClick={() => toggleS3(o)}
+                className={`px-1.5 py-0.5 rounded text-[10px] font-medium border transition-colors ${
+                  s3.has(o)
+                    ? 'bg-primary text-white border-primary'
+                    : 'bg-white dark:bg-slate-700 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-600 hover:border-primary'
+                }`}
+              >
+                {o}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+      <div className="flex justify-end gap-2 mt-3">
+        <button onClick={onClose} className="px-3 py-1.5 text-xs text-slate-500 hover:text-slate-700 dark:hover:text-slate-200">取消</button>
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          className="px-3 py-1.5 text-xs bg-primary text-white rounded-lg hover:bg-primary/90 disabled:opacity-50"
+        >
+          {saving ? '保存中…' : '保存'}
+        </button>
+      </div>
+    </div>
+  )
+}
 function SkeletonRow() {
   return (
     <tr>
@@ -133,45 +253,6 @@ function buildTooltip(issue) {
   return lines.join('\n')
 }
 
-// ── Tag Assigner floating panel ──
-function TagAssigner({ fundId, fundTags, allTags, onClose, onAssign, onRemove }) {
-  const assigned = new Set((fundTags || []).map(t => t.tag_id))
-  return (
-    <div
-      className="absolute z-50 bg-white dark:bg-slate-800 rounded-xl shadow-xl border border-slate-200 dark:border-slate-700 p-3 min-w-[160px]"
-      onClick={e => e.stopPropagation()}
-    >
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-xs font-semibold text-slate-600 dark:text-slate-300">分配标签</span>
-        <button onClick={onClose} className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-base leading-none">×</button>
-      </div>
-      {allTags.length === 0 ? (
-        <p className="text-xs text-slate-400 py-1">暂无标签，请先创建</p>
-      ) : (
-        <div className="space-y-1">
-          {allTags.map(tag => {
-            const has = assigned.has(tag.tag_id)
-            return (
-              <button
-                key={tag.tag_id}
-                className={`flex items-center gap-2 w-full text-left px-2 py-1.5 rounded text-xs hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors ${has ? 'font-medium' : ''}`}
-                onClick={() => has ? onRemove(fundId, tag.tag_id) : onAssign(fundId, tag.tag_id)}
-              >
-                <span
-                  className="w-3 h-3 rounded-full border-2 flex-shrink-0"
-                  style={{ borderColor: tagColor(tag.tag_id), backgroundColor: has ? tagColor(tag.tag_id) : 'transparent' }}
-                />
-                <span style={{ color: has ? tagColor(tag.tag_id) : undefined }}>{tag.tag_name}</span>
-                {has && <span className="ml-auto text-slate-400">✓</span>}
-              </button>
-            )
-          })}
-        </div>
-      )}
-    </div>
-  )
-}
-
 // ── Main component ──
 export default function FundList() {
   const navigate = useNavigate()
@@ -192,13 +273,19 @@ export default function FundList() {
   const [showFailures, setShowFailures] = useState(false)
   const [page, setPage] = useState(1)
 
-  // Tag state
-  const [allTags, setAllTags] = useState([])
-  const [activeTagId, setActiveTagId] = useState(null)
-  const [tagInput, setTagInput] = useState('')
-  const [tagPanel, setTagPanel] = useState(false)
-  const [tagAssigner, setTagAssigner] = useState(null)
-  const [tagLoading, setTagLoading] = useState(false)
+  // 策略筛选 state
+  const [filterS1, setFilterS1] = useState('')
+  const [filterS2, setFilterS2] = useState('')
+  const [filterS3, setFilterS3] = useState('')
+  const [showStrategyFilter, setShowStrategyFilter] = useState(false)
+
+  // 策略编辑 state
+  const [strategyEditor, setStrategyEditor] = useState(null) // { fundId }
+
+  // Excel 导入 state
+  const [importing, setImporting] = useState(false)
+  const [conflicts, setConflicts] = useState({ total: 0, items: [] })
+  const [showConflicts, setShowConflicts] = useState(false)
 
   const syncPollRef = useRef(null)
 
@@ -210,11 +297,6 @@ export default function FundList() {
   const [fundMetrics, setFundMetrics] = useState({})
   const colPickerRef = useRef(null)
 
-  // ── Load tags ──
-  const loadTags = useCallback(() => {
-    fetchTags().then(data => setAllTags(data.items || [])).catch(() => {})
-  }, [])
-
   // ── Load funds, stats, issues, returns, and sync status ──
   useEffect(() => {
     const controller = new AbortController()
@@ -223,7 +305,12 @@ export default function FundList() {
     setError(null)
     setLoading(true)
 
-    Promise.all([fetchStats(signal), fetchFunds(signal, activeTagId)])
+    const filters = {}
+    if (filterS1) filters.strategy1 = filterS1
+    if (filterS2) filters.strategy2 = filterS2
+    if (filterS3) filters.strategy3 = filterS3
+
+    Promise.all([fetchStats(signal), fetchFunds(signal, filters)])
       .then(([s, items]) => {
         setStats(s)
         setFunds(items)
@@ -237,10 +324,7 @@ export default function FundList() {
 
     const neededPeriods = RETURN_PERIOD_KEYS.filter(k => visibleCols.has(k))
     const periodsStr = neededPeriods.length > 0 ? neededPeriods.join(',') : '1w,1m,3m'
-    fetchFundReturns(
-      { periods: periodsStr, tag_id: activeTagId },
-      signal,
-    )
+    fetchFundReturns({ periods: periodsStr, strategy1: filterS1 || undefined }, signal)
       .then(data => setFundReturns(data.items || {}))
       .catch(err => { if (err.name !== 'AbortError') console.warn('returns load failed', err) })
 
@@ -262,19 +346,23 @@ export default function FundList() {
       .then(data => setFailures(data))
       .catch(err => { if (err.name !== 'AbortError') console.warn('failures load failed', err) })
 
+    fetchExcelConflicts(signal)
+      .then(data => setConflicts(data))
+      .catch(() => {})
+
     return () => controller.abort()
-  }, [retryCount, activeTagId, visibleCols])
+  }, [retryCount, filterS1, filterS2, filterS3, visibleCols])
 
   // ── Fetch metrics when any metrics column is visible ──
   useEffect(() => {
     const needsMetrics = COLUMN_DEFS.some(c => c.category === 'metrics' && visibleCols.has(c.key))
     if (!needsMetrics) return
     const controller = new AbortController()
-    fetchFundMetrics({ period: 'all', tag_id: activeTagId }, controller.signal)
+    fetchFundMetrics({ period: 'all', strategy1: filterS1 || undefined }, controller.signal)
       .then(data => setFundMetrics(data.items || {}))
       .catch(err => { if (err.name !== 'AbortError') console.warn('metrics load failed', err) })
     return () => controller.abort()
-  }, [visibleCols, activeTagId])
+  }, [visibleCols, filterS1])
 
   // ── Close col picker on outside click ──
   useEffect(() => {
@@ -285,8 +373,6 @@ export default function FundList() {
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
   }, [showColPicker])
-
-  useEffect(() => { loadTags() }, [loadTags])
 
   // ── Debounce search ──
   useEffect(() => {
@@ -304,11 +390,11 @@ export default function FundList() {
   }, [])
 
   useEffect(() => {
-    if (!tagAssigner) return
-    const handler = () => setTagAssigner(null)
+    if (!strategyEditor) return
+    const handler = () => setStrategyEditor(null)
     document.addEventListener('click', handler)
     return () => document.removeEventListener('click', handler)
-  }, [tagAssigner])
+  }, [strategyEditor])
 
   const handleSearchChange = useCallback((e) => setSearch(e.target.value), [])
 
@@ -346,65 +432,29 @@ export default function FundList() {
     }
   }, [syncing])
 
-  // ── Tag handlers ──
-  const handleCreateTag = useCallback(async () => {
-    const name = tagInput.trim()
-    if (!name) return
-    setTagLoading(true)
+  // ── Excel 导入 ──
+  const handleExcelImport = useCallback(async () => {
+    if (importing) return
+    setImporting(true)
     try {
-      await createTag(name)
-      setTagInput('')
-      loadTags()
+      await triggerExcelImport()
+      // 轮询等待完成
+      setTimeout(() => {
+        setImporting(false)
+        setRetryCount(c => c + 1)
+      }, 3000)
     } catch (err) {
-      alert(err.message)
-    } finally {
-      setTagLoading(false)
+      console.warn('excel import failed', err)
+      setImporting(false)
     }
-  }, [tagInput, loadTags])
+  }, [importing])
 
-  const handleDeleteTag = useCallback(async (tagId) => {
-    if (!window.confirm('删除该标签？已分配给基金的标签也会一并移除。')) return
-    try {
-      await deleteTag(tagId)
-      if (activeTagId === tagId) setActiveTagId(null)
-      loadTags()
-      setRetryCount(c => c + 1)
-    } catch (err) {
-      alert(err.message)
-    }
-  }, [activeTagId, loadTags])
-
-  const handleAssignTag = useCallback(async (fundId, tagId) => {
-    try {
-      await assignTag(fundId, tagId)
-      setFunds(prev => prev.map(f => {
-        if (f.fund_id !== fundId) return f
-        const tag = allTags.find(t => t.tag_id === tagId)
-        if (!tag) return f
-        const tags = f.tags || []
-        if (tags.some(t => t.tag_id === tagId)) return f
-        return { ...f, tags: [...tags, tag] }
-      }))
-    } catch (err) {
-      alert(err.message)
-    }
-  }, [allTags])
-
-  const handleRemoveTag = useCallback(async (fundId, tagId) => {
-    try {
-      await removeTag(fundId, tagId)
-      setFunds(prev => prev.map(f => {
-        if (f.fund_id !== fundId) return f
-        return { ...f, tags: (f.tags || []).filter(t => t.tag_id !== tagId) }
-      }))
-    } catch (err) {
-      alert(err.message)
-    }
-  }, [])
-
-  const openTagAssigner = useCallback((e, fundId) => {
-    e.stopPropagation()
-    setTagAssigner(prev => prev?.fundId === fundId ? null : { fundId })
+  // ── 策略标签保存 ──
+  const handleSaveStrategy = useCallback(async (fundId, strategy) => {
+    await updateFundStrategy(fundId, strategy)
+    setFunds(prev => prev.map(f =>
+      f.fund_id === fundId ? { ...f, ...strategy } : f
+    ))
   }, [])
 
   // ── Sort handler ──
@@ -566,6 +616,53 @@ export default function FundList() {
         </div>
       )}
 
+      {/* Conflicts modal */}
+      {showConflicts && (
+        <div
+          className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4"
+          onClick={() => setShowConflicts(false)}
+        >
+          <div
+            className="bg-white dark:bg-slate-900 rounded-2xl shadow-xl max-w-3xl w-full max-h-[80vh] flex flex-col border border-slate-200 dark:border-slate-800"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-slate-800">
+              <h2 className="text-base font-semibold">
+                数据冲突记录（{conflicts.total} 条）— Excel 数据已覆盖邮件数据
+              </h2>
+              <button onClick={() => setShowConflicts(false)} className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-xl leading-none">×</button>
+            </div>
+            <div className="overflow-auto flex-1 custom-scrollbar">
+              <table className="w-full text-xs">
+                <thead className="bg-slate-50 dark:bg-slate-800/50 sticky top-0">
+                  <tr className="text-left text-slate-500 border-b border-slate-200 dark:border-slate-800">
+                    <th className="px-4 py-2 font-medium">基金代码</th>
+                    <th className="px-4 py-2 font-medium">净值日期</th>
+                    <th className="px-4 py-2 font-medium">邮件净值</th>
+                    <th className="px-4 py-2 font-medium">Excel净值</th>
+                    <th className="px-4 py-2 font-medium">检测时间</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {conflicts.items.map(item => (
+                    <tr key={item.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/50">
+                      <td className="px-4 py-2 font-mono">{item['产品代码']}</td>
+                      <td className="px-4 py-2">{item['净值日期']}</td>
+                      <td className="px-4 py-2 text-slate-500">{item.email_unit_nav?.toFixed(4) || '—'}</td>
+                      <td className="px-4 py-2 text-rose-600 font-medium">{item.excel_unit_nav?.toFixed(4) || '—'}</td>
+                      <td className="px-4 py-2 text-slate-400">{item.detected_at?.slice(0, 16) || '—'}</td>
+                    </tr>
+                  ))}
+                  {conflicts.items.length === 0 && (
+                    <tr><td colSpan={5} className="px-4 py-8 text-center text-slate-400">暂无冲突记录</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ─── Header ─── */}
       <header className="h-16 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 px-4 md:px-8 flex items-center justify-between sticky top-14 lg:top-0 z-10">
         <div className="flex items-center gap-8">
@@ -584,6 +681,15 @@ export default function FundList() {
           )}
         </div>
         <div className="flex items-center gap-4">
+          {conflicts.total > 0 && (
+            <button
+              onClick={() => setShowConflicts(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-rose-50 dark:bg-rose-900/20 text-rose-600 border border-rose-200 dark:border-rose-800 rounded-lg hover:bg-rose-100 dark:hover:bg-rose-900/40 transition-colors"
+            >
+              <span className="material-symbols-outlined text-[16px]">sync_problem</span>
+              数据冲突 {conflicts.total}
+            </button>
+          )}
           {failures.total > 0 && (
             <button
               onClick={() => setShowFailures(true)}
@@ -604,6 +710,14 @@ export default function FundList() {
               </p>
             </div>
           )}
+          <button
+            onClick={handleExcelImport}
+            disabled={importing}
+            className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg font-medium shadow-md shadow-emerald-600/20 transition-all flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed text-sm"
+          >
+            <span className={`material-symbols-outlined text-[18px] ${importing ? 'animate-spin' : ''}`}>upload_file</span>
+            {importing ? '导入中…' : '导入Excel'}
+          </button>
           <button
             onClick={handleSync}
             disabled={syncing}
@@ -635,40 +749,43 @@ export default function FundList() {
         {/* ─── Filters & Search ─── */}
         <div className="flex flex-col md:flex-row md:items-center justify-between mb-6 gap-4">
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-sm font-medium text-slate-500 mr-2">标签筛选:</span>
-            <button
-              onClick={() => { setActiveTagId(null); setPage(1) }}
-              className={`px-4 py-1.5 rounded-full text-sm font-medium shadow-sm transition-colors ${
-                activeTagId === null
-                  ? 'bg-primary text-white'
-                  : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700'
-              }`}
+            <span className="text-sm font-medium text-slate-500 mr-1">策略筛选:</span>
+            {/* 一级筛选 */}
+            <select
+              value={filterS1}
+              onChange={e => { setFilterS1(e.target.value); setPage(1) }}
+              className="text-xs border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1.5 bg-white dark:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-primary/20 max-w-[130px]"
             >
-              全部
-            </button>
-            {allTags.map(tag => (
+              <option value="">全部一级</option>
+              {STRATEGY1_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+            </select>
+            {/* 二级筛选 */}
+            <select
+              value={filterS2}
+              onChange={e => { setFilterS2(e.target.value); setPage(1) }}
+              className="text-xs border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1.5 bg-white dark:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-primary/20 max-w-[130px]"
+            >
+              <option value="">全部二级</option>
+              {STRATEGY2_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+            </select>
+            {/* 三级筛选 */}
+            <select
+              value={filterS3}
+              onChange={e => { setFilterS3(e.target.value); setPage(1) }}
+              className="text-xs border border-slate-200 dark:border-slate-700 rounded-lg px-2 py-1.5 bg-white dark:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-primary/20 max-w-[110px]"
+            >
+              <option value="">全部三级</option>
+              {STRATEGY3_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+            </select>
+            {(filterS1 || filterS2 || filterS3) && (
               <button
-                key={tag.tag_id}
-                onClick={() => { setActiveTagId(activeTagId === tag.tag_id ? null : tag.tag_id); setPage(1) }}
-                className={`px-4 py-1.5 rounded-full text-sm font-medium shadow-sm transition-colors border ${
-                  activeTagId === tag.tag_id ? 'text-white' : 'bg-white dark:bg-slate-800'
-                }`}
-                style={
-                  activeTagId === tag.tag_id
-                    ? { backgroundColor: tagColor(tag.tag_id), borderColor: tagColor(tag.tag_id) }
-                    : { color: tagColor(tag.tag_id), borderColor: tagColor(tag.tag_id) + '88' }
-                }
+                onClick={() => { setFilterS1(''); setFilterS2(''); setFilterS3(''); setPage(1) }}
+                className="text-xs text-slate-400 hover:text-rose-500 transition-colors"
+                title="清除筛选"
               >
-                {tag.tag_name}
+                清除
               </button>
-            ))}
-            <button
-              onClick={() => setTagPanel(v => !v)}
-              className="w-8 h-8 flex items-center justify-center text-slate-400 hover:text-primary transition-colors"
-              title="管理标签"
-            >
-              <span className="material-symbols-outlined">settings_suggest</span>
-            </button>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <div className="relative group">
@@ -716,56 +833,6 @@ export default function FundList() {
             </div>
           </div>
         </div>
-
-        {/* Tag management panel */}
-        {tagPanel && (
-          <div className="mb-6 bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-4">
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">标签管理</span>
-              <button onClick={() => setTagPanel(false)} className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200">
-                <span className="material-symbols-outlined text-[18px]">close</span>
-              </button>
-            </div>
-            <div className="flex flex-wrap gap-2 mb-3">
-              {allTags.map(tag => (
-                <span
-                  key={tag.tag_id}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium"
-                  style={{ backgroundColor: tagColor(tag.tag_id) + '22', color: tagColor(tag.tag_id), border: `1px solid ${tagColor(tag.tag_id)}55` }}
-                >
-                  {tag.tag_name}
-                  <button
-                    onClick={() => handleDeleteTag(tag.tag_id)}
-                    className="hover:opacity-60 ml-0.5"
-                    title="删除标签"
-                  >
-                    ×
-                  </button>
-                </span>
-              ))}
-              {allTags.length === 0 && (
-                <span className="text-xs text-slate-400">暂无标签</span>
-              )}
-            </div>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={tagInput}
-                onChange={e => setTagInput(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && handleCreateTag()}
-                placeholder="新标签名称…"
-                className="px-3 py-1.5 border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary flex-1 max-w-[200px]"
-              />
-              <button
-                onClick={handleCreateTag}
-                disabled={tagLoading || !tagInput.trim()}
-                className="px-3 py-1.5 bg-primary text-white text-xs rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
-              >
-                {tagLoading ? '…' : '添加'}
-              </button>
-            </div>
-          </div>
-        )}
 
         {/* ─── Table ─── */}
         <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
@@ -816,7 +883,6 @@ export default function FundList() {
                         ? fundIssue.anomalous.length + fundIssue.gaps.length
                         : 0
                       const hasIssue = fundIssueCount > 0
-                      const isAssigning = tagAssigner?.fundId === fund.fund_id
                       const globalIdx = pageStart + idx
 
                       return (
@@ -843,33 +909,25 @@ export default function FundList() {
                               <span className="font-medium text-slate-900 dark:text-white">
                                 {fund.product_name || '—'}
                               </span>
-                              <div className="flex items-center gap-1 mt-0.5" onClick={e => e.stopPropagation()}>
-                                {(fund.tags || []).map(t => (
-                                  <span
-                                    key={t.tag_id}
-                                    className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium cursor-pointer"
-                                    style={{ backgroundColor: tagColor(t.tag_id) + '22', color: tagColor(t.tag_id) }}
-                                    onClick={() => setActiveTagId(t.tag_id)}
-                                  >
-                                    {t.tag_name}
-                                  </span>
+                              <div className="flex items-center gap-1 mt-0.5 flex-wrap" onClick={e => e.stopPropagation()}>
+                                {fund.strategy1 && <StrategyBadge label={fund.strategy1} color="blue" />}
+                                {fund.strategy2 && <StrategyBadge label={fund.strategy2} color="violet" />}
+                                {fund.strategy3 && fund.strategy3.split(',').filter(Boolean).map(s => (
+                                  <StrategyBadge key={s} label={s.trim()} color="slate" />
                                 ))}
                                 <button
                                   className="w-4 h-4 rounded border border-dashed border-slate-300 dark:border-slate-600 text-slate-400 hover:border-primary hover:text-primary text-[10px] leading-none flex items-center justify-center"
-                                  onClick={e => openTagAssigner(e, fund.fund_id)}
-                                  title="添加标签"
+                                  onClick={e => { e.stopPropagation(); setStrategyEditor(prev => prev?.fundId === fund.fund_id ? null : { fundId: fund.fund_id }) }}
+                                  title="编辑策略标签"
                                 >
-                                  +
+                                  <span className="material-symbols-outlined text-[12px]">edit</span>
                                 </button>
-                                {isAssigning && (
-                                  <div className="absolute mt-1">
-                                    <TagAssigner
-                                      fundId={fund.fund_id}
-                                      fundTags={fund.tags}
-                                      allTags={allTags}
-                                      onClose={() => setTagAssigner(null)}
-                                      onAssign={handleAssignTag}
-                                      onRemove={handleRemoveTag}
+                                {strategyEditor?.fundId === fund.fund_id && (
+                                  <div className="absolute mt-1 z-50">
+                                    <StrategyEditor
+                                      fund={fund}
+                                      onClose={() => setStrategyEditor(null)}
+                                      onSave={handleSaveStrategy}
                                     />
                                   </div>
                                 )}
