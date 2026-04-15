@@ -5,22 +5,24 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:all": "concurrently -n backend,frontend -c cyan,green \"python ../api.py\" \"vite\"",
     "build": "vite build",
     "preview": "vite preview"
   },
   "dependencies": {
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "react-router-dom": "^6.28.0",
     "chart.js": "^4.4.7",
+    "chartjs-plugin-annotation": "^3.1.0",
+    "react": "^18.3.1",
     "react-chartjs-2": "^5.3.0",
-    "chartjs-plugin-annotation": "^3.1.0"
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.28.0"
   },
   "devDependencies": {
-    "vite": "^5.4.11",
     "@vitejs/plugin-react": "^4.3.4",
-    "tailwindcss": "^3.4.17",
+    "autoprefixer": "^10.4.20",
+    "concurrently": "^9.2.1",
     "postcss": "^8.4.49",
-    "autoprefixer": "^10.4.20"
+    "tailwindcss": "^3.4.17",
+    "vite": "^5.4.11"
   }
 }

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Fund NAV (Net Asset Value) data collection and visualization system. Pulls fund data from 163 email attachments (Excel files), stores it in SQLite, serves it via a FastAPI REST API, and displays it in a React frontend. Also supports A-share index and financial futures daily/intraday data via akshare (free, no API key required). Includes a Middle East conflict & crude oil news aggregator (RSS from USNI News / OilPrice.com / Al Jazeera, auto-fetched every 2 hours) and cross-validation of WTI/Brent prices against Yahoo Finance (yfinance).
+Fund NAV (Net Asset Value) data collection and visualization system. Pulls fund data from 163 email attachments (Excel files), stores it in SQLite, serves it via a FastAPI REST API, and displays it in a React frontend. Also integrates ZX fund Excel data (`zx_fund.db` → merged into `fund_data.db` via `db_merger.py`). Supports A-share index and financial futures daily/intraday data via akshare (free, no API key required). Includes a Middle East conflict & crude oil news aggregator (RSS from USNI News / OilPrice.com / Al Jazeera, auto-fetched every 2 hours) and cross-validation of WTI/Brent prices against Yahoo Finance (yfinance).
 
 ## Commands
 
@@ -26,6 +26,15 @@ python get_crude_data.py
 # Fetch Middle East / crude oil news from RSS feeds
 python get_news_data.py
 
+# Import ZX fund Excel data into zx_fund.db (one-time or incremental)
+python zx_importer.py --db zx_fund.db --zxdb demo/ZXdatabase.xlsx --shelf demo/臻选货架.xlsx
+
+# Unify DB schemas (one-time migration, idempotent)
+python db_schema_migrate.py
+
+# Merge zx_fund.db data into fund_data.db (idempotent, zx wins on conflicts)
+python db_merger.py
+
 # Run data quality check and generate fund_clean.db
 python data_quality_check.py
 
@@ -46,8 +55,11 @@ cd web
 # Install dependencies
 npm install
 
-# Start dev server (http://localhost:5173)
+# Start dev server only (http://localhost:5173)
 npm run dev
+
+# Start both backend + frontend in one terminal
+npm run dev:all
 
 # Production build (outputs to web/dist/)
 npm run build
@@ -77,6 +89,8 @@ Use `systemctl status fundata-api` and `journalctl -u fundata-api -f` to monitor
 
 The system has four layers:
 
+**Data Ingestion — ZX Fund Excel** (`zx_importer.py` + `db_schema_migrate.py` + `db_merger.py`): Imports ZX fund product catalog and NAV history from two Excel files (`ZXdatabase.xlsx` + `臻选货架.xlsx`) into a staging database `zx_fund.db`. Schema of both databases is then unified via `db_schema_migrate.py` (English column names, consistent date format `YYYY-MM-DD`, matching FK structure). Finally `db_merger.py` merges `zx_fund.db` into `fund_data.db` using `fund_code` as the join key; zx data wins on conflicts; all field-level and value-level differences are logged to `migration_conflicts`. The migration is idempotent and opens `zx_fund.db` read-only (URI mode).
+
 **Data Ingestion — Email** (`get_163_email.py` + `smart_extractor.py`): IMAP client connects to 163 email, fetches attachments incrementally by UID, extracts Excel files in-memory (BytesIO), and delegates to `smart_extractor.py` which detects and parses multiple Excel layouts (table format, key-value format, etc.). Parsed records go into `fund_data.db`. Failed extractions are logged to `extraction_failures`.
 
 **Data Ingestion — Market** (`get_market_data.py`): Fetches A-share index daily data from Tencent QQ Finance API (direct JSONP) and CFFEX financial futures daily data from akshare (official CFFEX website). Resolves active contracts via `ak.match_main_contract`. Also supports 5-minute intraday K-lines via Sina Finance. Runs incrementally using `market_index_last_date` / `market_futures_last_date` keys in `sync_state`. No API token required.
@@ -100,12 +114,13 @@ The API base URL is proxied via Vite to `http://127.0.0.1:8000`.
 
 ## Databases
 
-Two SQLite databases:
+Three SQLite databases:
 
-- **`fund_data.db`** — raw data with full lineage. Key tables: `funds` (master, keyed on `产品代码`), `fund_nav_data` (NAV records, UNIQUE on `(产品代码, 净值日期)`), `email_sources` (audit trail), `extraction_failures` (failed attachment parses), `sync_state` (IMAP UID checkpoint + scheduler sync status), `index_daily` (A-share index OHLCV), `futures_daily` (financial futures OHLCV+OI), `index_5min` (index 5-min bars), `futures_5min` (futures 5-min bars), `crude_daily` (WTI/Brent/SC OHLCV), `crude_price_cross` (WTI/Brent cross-validation vs yfinance), `crude_news` (RSS news articles).
+- **`fund_data.db`** — primary database, all data merged here. Key tables: `funds` (master, keyed on `fund_code` UNIQUE, 321 funds post-merge), `fund_nav_data` (NAV records, UNIQUE on `(fund_code, nav_date)`, 62 720 rows post-merge), `migration_conflicts` (field-level and value-level diffs from zx merge), `extraction_failures` (failed attachment parses), `sync_state` (IMAP UID checkpoint + scheduler sync status), `index_daily` (A-share index OHLCV), `futures_daily` (financial futures OHLCV+OI), `index_5min` (index 5-min bars), `futures_5min` (futures 5-min bars), `crude_daily` (WTI/Brent/SC OHLCV), `crude_price_cross` (WTI/Brent cross-validation vs yfinance), `crude_news` (RSS news articles).
+- **`zx_fund.db`** — staging database for ZX fund Excel imports. Tables: `zx_fund_product` (273 funds, same schema as `funds`), `zx_fund_nav` (56 645 NAV rows). Read-only source for `db_merger.py`; never modified after merge.
 - **`fund_clean.db`** — generated by `data_quality_check.py`. Filters out NAV > 5, deduplicates, and denormalizes email source fields inline.
 
-Dates are stored as `YYYYMMDD` strings in the DB; the fund API accepts/returns `YYYY-MM-DD`. Market endpoints accept/return `YYYYMMDD` directly.
+**Column naming**: both `fund_data.db` and `zx_fund.db` use unified English column names after `db_schema_migrate.py` was applied (session 002). `nav_date` in `fund_nav_data` is stored as `YYYY-MM-DD`; market/futures tables still use `YYYYMMDD`. `data_source` column distinguishes record origin: `'email'` (IMAP attachment), `'manual'` (hand-entered via API), `'zx_excel'` (imported from ZX Excel).
 
 ### `sync_state` keys
 
@@ -216,8 +231,11 @@ MARKET_INTRADAY_MODE=0
 - **Smart extraction**: `smart_extractor.py` handles 4+ Excel layouts with Chinese field name aliases for normalization.
 - **Extraction failures**: Failed attachment parses are recorded in `extraction_failures` table. Frontend shows orange badge with count and modal detail view.
 - **Dual DB pattern**: Raw DB preserves all data; clean DB is regenerated on demand from quality checks.
-- **`fund_id` as canonical key**: Integer `fund_id` in `funds` table is the stable cross-database identifier; `产品代码` (product code) is the unique business key.
-- **Quality filter default**: API defaults `apply_filter=true`, excluding anomalous NAV values from responses.
+- **`fund_code` as canonical key**: `fund_code` (TEXT UNIQUE) is the universal business key shared by both databases. `fund_id` (INTEGER PK) is a database-internal surrogate that differs between `fund_data.db` and `zx_fund.db` — never copy it across databases.
+- **Schema unification** (`db_schema_migrate.py`): one-time migration that renamed Chinese columns to English in both databases, converted `nav_date` from `YYYYMMDD` to `YYYY-MM-DD`, added new metadata columns (`strategy_l3`, `manager`, `custodian`, `inception_date`, `start_date`, `display`), and changed `zx_fund_nav` FK from TEXT `fund_code` to INTEGER `fund_id`. Idempotent (checks target columns before migrating).
+- **ZX data merge** (`db_merger.py`): merges `zx_fund_product` → `funds` and `zx_fund_nav` → `fund_nav_data`. Uses `fund_code` to detect overlap; zx wins on all conflicts. Field-level and NAV value-level differences logged to `migration_conflicts` (dropped and recreated each run for idempotency). `adj_nav` recalculated from scratch for every affected fund using the formula: `adj[0]=1.0`, `adj[i] = adj[i-1] × (unit[i-1] + accum[i] − accum[i-1]) / unit[i-1]`. `zx_fund.db` opened with SQLite URI `mode=ro` — never written.
+- **`data_source` column**: three values distinguish record origin in `fund_nav_data`: `'email'` (parsed from IMAP attachment), `'manual'` (entered via `POST /api/nav`), `'zx_excel'` (imported from ZX Excel or overwritten by zx merge).
+- **Incremental sync**: IMAP UID + UIDVALIDITY stored in `sync_state` table; falls back to full scan if mailbox is rebuilt.
 - **Manual NAV records**: `source_id = NULL` identifies manually entered records. FundDetail highlights them as orange dots on the chart and shows a deletable list below.
 - **Issue detection**: `_compute_issues(conn, fund_id)` detects anomalous records (unit_nav > 5) and date gaps. Gap threshold = `max(median_interval × 2.5, 30 days)`. Called by `GET /api/funds/issues` (all funds) and `GET /api/funds/{fund_id}/issues`.
 - **Chart annotations**: `chartjs-plugin-annotation` v3 (Chart.js v4 compatible) draws red dashed lines on anomalous dates and semi-transparent grey boxes over gap ranges.

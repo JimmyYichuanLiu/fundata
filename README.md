@@ -1,6 +1,6 @@
 # 基金净值数据采集与可视化系统
 
-自动从 163 邮箱中拉取 Excel 附件，智能提取基金净值数据并存入 SQLite 数据库，支持数据质量检测、Excel 导出，以及通过 **FastAPI 后端 API** 进行数据查询与手动编辑。同时支持通过 **akshare**（免费，无需 Token）接入 A 股主要指数、中金所金融期货、全球原油价格日线行情及股指期货基差分析。此外内置 **中东冲突与原油新闻** RSS 聚合功能，每 2 小时自动抓取 USNI News / OilPrice.com / Al Jazeera 三个来源，并通过 **yfinance 交叉验证** WTI/Brent 价格数据可靠性。前端为 React 单页应用，支持移动端（≥375px）。
+自动从 163 邮箱中拉取 Excel 附件，智能提取基金净值数据并存入 SQLite 数据库；同时通过 `zx_importer.py` 导入臻选基金 Excel 数据，并经 `db_merger.py` 将两路数据合并为统一数据库（321 只基金，62,720 条净值）。支持数据质量检测、Excel 导出，以及通过 **FastAPI 后端 API** 进行数据查询与手动编辑。同时支持通过 **akshare**（免费，无需 Token）接入 A 股主要指数、中金所金融期货、全球原油价格日线行情及股指期货基差分析。此外内置 **中东冲突与原油新闻** RSS 聚合功能，每 2 小时自动抓取 USNI News / OilPrice.com / Al Jazeera 三个来源，并通过 **yfinance 交叉验证** WTI/Brent 价格数据可靠性。前端为 React 单页应用，支持移动端（≥375px）。
 
 ---
 
@@ -10,6 +10,9 @@
 emailcontent/
 ├── get_163_email.py        # 主程序：连接邮箱、提取附件、写入数据库
 ├── smart_extractor.py      # 核心库：智能识别 Excel 格式并提取数据
+├── zx_importer.py          # 臻选基金 Excel 导入：ZXdatabase.xlsx + 臻选货架.xlsx → zx_fund.db
+├── db_schema_migrate.py    # Schema 统一迁移（一次性，幂等）：两库列名统一为英文
+├── db_merger.py            # 数据合并：zx_fund.db → fund_data.db（fund_code 匹配，zx 优先）
 ├── get_market_data.py      # 行情拉取：akshare 指数 + 金融期货日线/5分钟K线
 ├── get_crude_data.py       # 原油数据拉取：WTI/Brent/SC 日频 + yfinance 交叉验证
 ├── crude_api.py            # 原油 API 路由（FastAPI APIRouter，挂载到 api.py）
@@ -52,37 +55,33 @@ emailcontent/
 └── .gitignore
 ```
 
-> `fund_data.db`、`fund_clean.db`、`email_attachments/` 均已 gitignore，不进入版本控制。
+> `fund_data.db`、`zx_fund.db`、`fund_clean.db`、`email_attachments/` 均已 gitignore，不进入版本控制。
 
 ---
 
 ## 数据流
 
 ```
-163 邮箱 (IMAP)                         akshare (免费，无需 Token)
-       │                                       │
-       ▼                                       ▼
-get_163_email.py                  get_market_data.py  get_crude_data.py
-       │   增量拉取（基于 IMAP UID）   指数+期货日线/5min  WTI/Brent/SC 日线
-       │   12:00/18:00 自动执行       11:30/15:15 自动执行  15:20 自动同步
-       │   POST /api/sync/trigger    POST /api/market/sync/trigger  + yfinance 交叉验证
-       │                             POST /api/crude/sync/trigger
-       │
-       │                         RSS 新闻源（免费，无需 Token）
-       │                         USNI News / OilPrice.com / Al Jazeera
-       │                                       │
-       │                               get_news_data.py
-       │                               每 2 小时自动抓取
-       │                               POST /api/news/sync/trigger
-       │                                       │
-       ▼                                       ▼
-fund_data.db  ◄──────────────────────────────
-  (funds, fund_nav_data, email_sources,
-   extraction_failures, sync_state,
-   index_daily, futures_daily,
+163 邮箱 (IMAP)          ZX 臻选 Excel                akshare (免费，无需 Token)
+       │                       │                               │
+       ▼                       ▼                               ▼
+get_163_email.py        zx_importer.py          get_market_data.py  get_crude_data.py
+  增量拉取(IMAP UID)   ZXdatabase + 货架.xlsx    指数+期货日线/5min  WTI/Brent/SC 日线
+  12:00/18:00 自动执行       │                   11:30/15:15 自动执行  15:20 自动同步
+       │                       ▼                               │
+       │                  zx_fund.db              RSS 新闻源（免费，无需 Token）
+       │               (273 基金，56,645 净值)    USNI / OilPrice / Al Jazeera
+       │                       │                               │
+       │               db_schema_migrate.py               get_news_data.py
+       │               db_merger.py (zx 优先)          每 2 小时自动抓取
+       │                       │                               │
+       ▼                       ▼                               ▼
+fund_data.db  ◄──────────────────────────────────────────────
+  (funds 321只, fund_nav_data 62,720条,
+   migration_conflicts, extraction_failures,
+   sync_state, index_daily, futures_daily,
    index_5min, futures_5min,
-   crude_daily, crude_price_cross,
-   crude_news)
+   crude_daily, crude_price_cross, crude_news)
        │
        ├──────────────────────────────────┐
        ▼                                  ▼
@@ -144,6 +143,21 @@ python get_163_email.py
 
 首次运行全量扫描所有邮件，此后每次只处理新邮件（增量模式）。
 
+### 3a. 导入 ZX 臻选基金数据（可选，一次性）
+
+```bash
+# 导入 ZX Excel 数据到 zx_fund.db
+python zx_importer.py --db zx_fund.db --zxdb demo/ZXdatabase.xlsx --shelf demo/臻选货架.xlsx
+
+# 统一两库 schema（列名英文化，幂等）
+python db_schema_migrate.py
+
+# 将 zx_fund.db 数据合并进 fund_data.db（zx 优先，幂等）
+python db_merger.py
+```
+
+合并结果：321 只基金，62,720 条净值。冲突记录写入 `migration_conflicts` 表。
+
 ### 4. 拉取 A 股行情（可选）
 
 ```bash
@@ -199,7 +213,14 @@ python api.py
 ```bash
 cd web
 npm install        # 首次需要安装依赖
-npm run dev        # 开发服务器 http://localhost:5173
+npm run dev        # 仅启动前端开发服务器 http://localhost:5173
+```
+
+或一条命令同时启动后端 + 前端（需先完成步骤 7 的后端配置）：
+
+```bash
+cd web
+npm run dev:all    # 同时启动 python api.py 和 vite，日志合并输出
 ```
 
 ### 9. 导出 Excel（可选）
@@ -496,11 +517,17 @@ python organize_fund_data.py
 
 ## 数据库 Schema
 
-### `fund_data.db`（原始库）
+### `fund_data.db`（主库，合并后）
 
-**`funds`** — 基金主表：`fund_id (PK)`, `产品代码 (UNIQUE)`, `产品名称`, `首次录入时间`
+**`funds`** — 基金主表：`fund_id (PK AUTOINCREMENT)`, `fund_code (TEXT UNIQUE)`, `fund_name`, `created_at`, `benchmark_index`, `strategy_l1`, `strategy_l2`, `strategy_l3`, `manager`, `custodian`, `inception_date`, `start_date`, `display`
+- 来源：邮件 58 只 + ZX 263 只 = **321 只**
 
-**`fund_nav_data`** — 基金净值：`id (PK)`, `fund_id (FK)`, `产品代码`, `净值日期 (YYYYMMDD)`, `单位净值`, `累计单位净值`, `source_id (NULL = 手动录入)`, UNIQUE(`产品代码`, `净值日期`)
+**`fund_nav_data`** — 基金净值：`id (PK)`, `fund_id (FK)`, `fund_code`, `fund_name`, `nav_date (YYYY-MM-DD)`, `unit_nav`, `accum_nav`, `录入时间`, `source_id (NULL=手动录入或zx覆盖)`, `adj_nav (复权净值)`, `data_source ('email'|'manual'|'zx_excel')`, UNIQUE(`fund_code`, `nav_date`)
+- 共 **62,720 条**（email 6,075 + zx_excel 56,645）
+
+**`migration_conflicts`** — 合并冲突记录：`id`, `migrated_at`, `table_name`, `fund_code`, `nav_date`, `column_name`, `old_value`, `new_value`, `resolution ('zx_wins')`
+- 每次执行 `db_merger.py` 时自动清空并重建（幂等）
+- 本次合并：82 条字段冲突 + 25 条净值数值冲突
 
 **`extraction_failures`** — 提取失败记录：时间、邮件主题、发件人、附件文件名、sheet名称、失败原因
 
@@ -526,6 +553,16 @@ python organize_fund_data.py
 **`crude_price_cross`** — 原油价格交叉验证：`ts_code`, `trade_date`, `close_primary`（akshare）, `close_alt`（yfinance）, `diff_pct`, `is_verified`（差异<3%为1）, `verified_at`, UNIQUE(`ts_code`, `trade_date`)
 
 **`crude_news`** — 原油/中东冲突新闻：`id`, `title`, `url (UNIQUE)`, `source_name`, `published_at`, `summary`, `category`（conflict/crude）, `fetched_at`
+
+---
+
+### `zx_fund.db`（ZX 暂存库，只读来源）
+
+**`zx_fund_product`** — 产品目录：与 `funds` 表结构相同（`fund_id` PK、`fund_code` UNIQUE、`benchmark_index` 等）。273 只基金。
+
+**`zx_fund_nav`** — 净值数据：与 `fund_nav_data` 结构相同（`fund_id` INTEGER FK、`nav_date` YYYY-MM-DD、`data_source='zx_excel'`）。56,645 条。
+
+> `db_merger.py` 以只读方式打开 `zx_fund.db`，合并完成后该库不再修改。
 
 ---
 
