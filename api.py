@@ -115,57 +115,47 @@ logger = logging.getLogger("fund_api")
 # =============================================================================
 
 def _init_db_schema():
-    """Ensure funds table exists and fund_id column is present in fund_nav_data.
-    Mirrors the migration logic from get_163_email.py init_database(), but
-    only for the tables/columns the API depends on."""
+    """Ensure the post-migration English-column schema exists.
+    Creates missing tables/indexes; does NOT rename columns (that is
+    db_schema_migrate.py's job).  Safe to call on an already-migrated DB."""
     with _get_raw_conn() as conn:
-        # Create funds table if not present
+        # funds — English columns (post-migration schema)
         conn.execute('''
             CREATE TABLE IF NOT EXISTS funds (
-                fund_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                产品代码 TEXT NOT NULL UNIQUE,
-                产品名称 TEXT,
-                首次录入时间 DATETIME DEFAULT CURRENT_TIMESTAMP
+                fund_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                fund_code       TEXT NOT NULL UNIQUE,
+                fund_name       TEXT,
+                created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+                benchmark_index TEXT DEFAULT NULL,
+                strategy_l1     TEXT DEFAULT NULL,
+                strategy_l2     TEXT DEFAULT NULL,
+                strategy_l3     TEXT DEFAULT NULL,
+                manager         TEXT DEFAULT NULL,
+                custodian       TEXT DEFAULT NULL,
+                inception_date  TEXT DEFAULT NULL,
+                start_date      TEXT DEFAULT NULL,
+                display         TEXT
             )
         ''')
 
-        # Add fund_id column to fund_nav_data if missing
-        try:
-            conn.execute(
-                'ALTER TABLE fund_nav_data ADD COLUMN fund_id INTEGER REFERENCES funds(fund_id)'
-            )
-        except Exception:
-            pass  # column already exists
-
-        # Add adjusted_nav column to fund_nav_data if missing
-        try:
-            conn.execute('ALTER TABLE fund_nav_data ADD COLUMN adjusted_nav REAL')
-        except Exception:
-            pass  # column already exists
-
-        # Populate funds from fund_nav_data if empty
-        empty = conn.execute('SELECT COUNT(*) FROM funds').fetchone()[0] == 0
-        if empty:
-            conn.execute('''
-                INSERT OR IGNORE INTO funds (产品代码, 产品名称, 首次录入时间)
-                SELECT 产品代码, MIN(产品名称), MIN(插入时间)
-                FROM fund_nav_data
-                WHERE 产品代码 IS NOT NULL
-                GROUP BY 产品代码
-                ORDER BY MIN(插入时间)
-            ''')
-
-        # Backfill fund_id in fund_nav_data for existing rows
+        # fund_nav_data — English columns (post-migration schema)
         conn.execute('''
-            UPDATE fund_nav_data
-            SET fund_id = (SELECT fund_id FROM funds WHERE funds.产品代码 = fund_nav_data.产品代码)
-            WHERE fund_id IS NULL AND 产品代码 IS NOT NULL
+            CREATE TABLE IF NOT EXISTS fund_nav_data (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                fund_id     INTEGER,
+                fund_code   TEXT,
+                fund_name   TEXT,
+                nav_date    TEXT NOT NULL,
+                unit_nav    REAL NOT NULL,
+                accum_nav   REAL,
+                "录入时间"  DATETIME DEFAULT CURRENT_TIMESTAMP,
+                source_id   INTEGER,
+                adj_nav     REAL,
+                data_source TEXT,
+                UNIQUE(fund_code, nav_date),
+                FOREIGN KEY (fund_id) REFERENCES funds(fund_id)
+            )
         ''')
-
-        # Ensure indexes exist
-        conn.execute('CREATE INDEX IF NOT EXISTS idx_fund_id ON fund_nav_data(fund_id)')
-        conn.execute('CREATE INDEX IF NOT EXISTS idx_product_code ON fund_nav_data(产品代码)')
-        conn.execute('CREATE INDEX IF NOT EXISTS idx_nav_date ON fund_nav_data(净值日期)')
 
         # Tag tables
         conn.execute("""
@@ -183,21 +173,10 @@ def _init_db_schema():
             )
         """)
 
-        # Add benchmark_index column to funds if missing
-        try:
-            conn.execute('ALTER TABLE funds ADD COLUMN benchmark_index TEXT DEFAULT NULL')
-        except Exception:
-            pass  # column already exists
-
-        # Add strategy columns to funds if missing
-        try:
-            conn.execute('ALTER TABLE funds ADD COLUMN strategy_l1 TEXT DEFAULT NULL')
-        except Exception:
-            pass
-        try:
-            conn.execute('ALTER TABLE funds ADD COLUMN strategy_l2 TEXT DEFAULT NULL')
-        except Exception:
-            pass
+        # Indexes
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_fund_id   ON fund_nav_data(fund_id)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_fund_code ON fund_nav_data(fund_code)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_nav_date  ON fund_nav_data(nav_date)')
 
     logger.info("Database schema initialised at %s", DB_PATH)
 
@@ -471,14 +450,14 @@ def get_db():
 
 
 def get_or_create_fund_id(conn, product_code: str, product_name: Optional[str] = None) -> int:
-    """Get existing fund_id or create a new funds record. Copied from get_163_email.py."""
+    """Get existing fund_id or create a new funds record."""
     cursor = conn.cursor()
-    cursor.execute("SELECT fund_id FROM funds WHERE 产品代码 = ?", (product_code,))
+    cursor.execute("SELECT fund_id FROM funds WHERE fund_code = ?", (product_code,))
     row = cursor.fetchone()
     if row:
         return row[0]
     cursor.execute(
-        "INSERT INTO funds (产品代码, 产品名称) VALUES (?, ?)",
+        "INSERT INTO funds (fund_code, fund_name) VALUES (?, ?)",
         (product_code, product_name),
     )
     conn.commit()
@@ -513,27 +492,27 @@ def api_date_to_db(s: str) -> str:
 
 def nav_row_to_model(row) -> NavRecord:
     try:
-        unit_nav = float(row["单位净值"])
+        unit_nav = float(row["unit_nav"])
     except (TypeError, ValueError):
         unit_nav = 0.0
     try:
-        accumulated_nav = float(row["累计单位净值"]) if row["累计单位净值"] is not None else None
+        accumulated_nav = float(row["accum_nav"]) if row["accum_nav"] is not None else None
     except (TypeError, ValueError):
         accumulated_nav = None
     try:
-        adjusted_nav = float(row["adjusted_nav"]) if row["adjusted_nav"] is not None else None
+        adjusted_nav = float(row["adj_nav"]) if row["adj_nav"] is not None else None
     except (TypeError, ValueError):
         adjusted_nav = None
     return NavRecord(
         id=row["id"],
         fund_id=row["fund_id"],
-        product_name=row["产品名称"],
-        product_code=row["产品代码"],
-        nav_date=db_date_to_api(row["净值日期"]),
+        product_name=row["fund_name"],
+        product_code=row["fund_code"],
+        nav_date=row["nav_date"],  # already YYYY-MM-DD in DB
         unit_nav=unit_nav,
         accumulated_nav=accumulated_nav,
         adjusted_nav=adjusted_nav,
-        insert_time=row["插入时间"],
+        insert_time=row["录入时间"],
         source_id=row["source_id"],
     )
 
@@ -542,7 +521,7 @@ def quality_filter_sql(apply: bool) -> str:
     """Return SQL AND clause for quality filter, or empty string."""
     if not apply:
         return ""
-    return " AND 单位净值 <= 5 AND (累计单位净值 IS NULL OR 累计单位净值 <= 5)"
+    return " AND unit_nav <= 5 AND (accum_nav IS NULL OR accum_nav <= 5)"
 
 
 # ── Sync state helpers ──────────────────────────────────────────────────────
@@ -634,13 +613,13 @@ def _run_realtime_sync():
 
 def _compute_issues(conn, fund_id: int) -> dict:
     rows = conn.execute(
-        """SELECT 净值日期, 单位净值 FROM fund_nav_data
-           WHERE fund_id=? AND 净值日期 IS NOT NULL AND LENGTH(净值日期) = 8
-           ORDER BY 净值日期 ASC""",
+        """SELECT nav_date, unit_nav FROM fund_nav_data
+           WHERE fund_id=? AND nav_date IS NOT NULL AND LENGTH(nav_date) = 10
+           ORDER BY nav_date ASC""",
         (fund_id,)
     ).fetchall()
     anomalous = [
-        {"nav_date": db_date_to_api(r[0]), "unit_nav": float(r[1])}
+        {"nav_date": r[0], "unit_nav": float(r[1])}
         for r in rows if r[1] is not None and float(r[1]) > 5
     ]
     gaps = []
@@ -648,7 +627,7 @@ def _compute_issues(conn, fund_id: int) -> dict:
     if len(dates) >= 3:
         try:
             ivs = [
-                (datetime.strptime(dates[i+1], "%Y%m%d") - datetime.strptime(dates[i], "%Y%m%d")).days
+                (datetime.strptime(dates[i+1], "%Y-%m-%d") - datetime.strptime(dates[i], "%Y-%m-%d")).days
                 for i in range(len(dates) - 1)
             ]
             median = sorted(ivs)[len(ivs) // 2]
@@ -656,8 +635,8 @@ def _compute_issues(conn, fund_id: int) -> dict:
             for i, gap_days in enumerate(ivs):
                 if gap_days > threshold:
                     gaps.append({
-                        "from_date": db_date_to_api(dates[i]),
-                        "to_date": db_date_to_api(dates[i + 1]),
+                        "from_date": dates[i],
+                        "to_date": dates[i + 1],
                         "gap_days": gap_days,
                     })
         except Exception as e:
@@ -735,6 +714,7 @@ def get_stats(conn: sqlite3.Connection = Depends(get_db)):
 def list_funds(
     strategy_l1: Optional[str] = Query(None),
     strategy_l2: Optional[str] = Query(None),
+    apply_filter: bool = Query(True, description="Exclude unit_nav > 5 from record_count"),
     conn: sqlite3.Connection = Depends(get_db),
 ):
     conditions = []
@@ -747,22 +727,23 @@ def list_funds(
         params.append(strategy_l2)
 
     where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    nav_filter = "AND n.unit_nav <= 5" if apply_filter else ""
 
     rows = conn.execute(
         f"""
         SELECT
             f.fund_id,
-            f.产品代码,
-            f.产品名称,
-            f.首次录入时间,
+            f.fund_code,
+            f.fund_name,
+            f.created_at,
             f.strategy_l1,
             f.strategy_l2,
-            COUNT(n.id)                                  AS record_count,
-            MIN(n.净值日期)                               AS earliest_date,
-            MAX(n.净值日期)                               AS latest_date,
-            COUNT(CASE WHEN n.单位净值 > 5 THEN 1 END)   AS anomalous_count
+            COUNT(n.id)                                AS record_count,
+            MIN(n.nav_date)                            AS earliest_date,
+            MAX(n.nav_date)                            AS latest_date,
+            COUNT(CASE WHEN n.unit_nav > 5 THEN 1 END) AS anomalous_count
         FROM funds f
-        LEFT JOIN fund_nav_data n ON f.fund_id = n.fund_id
+        LEFT JOIN fund_nav_data n ON f.fund_id = n.fund_id {nav_filter}
         {where_clause}
         GROUP BY f.fund_id
         ORDER BY f.fund_id
@@ -775,7 +756,7 @@ def list_funds(
         latest_nav: Optional[float] = None
         if r["latest_date"]:
             nav_row = conn.execute(
-                "SELECT 单位净值 FROM fund_nav_data WHERE fund_id = ? AND 净值日期 = ? LIMIT 1",
+                "SELECT unit_nav FROM fund_nav_data WHERE fund_id = ? AND nav_date = ? LIMIT 1",
                 (r["fund_id"], r["latest_date"]),
             ).fetchone()
             if nav_row:
@@ -786,12 +767,12 @@ def list_funds(
 
         fd = FundDetail(
             fund_id=r["fund_id"],
-            product_code=r["产品代码"],
-            product_name=r["产品名称"],
-            first_entry_time=r["首次录入时间"],
+            product_code=r["fund_code"],
+            product_name=r["fund_name"],
+            first_entry_time=r["created_at"],
             record_count=r["record_count"] or 0,
-            earliest_date=db_date_to_api(r["earliest_date"]),
-            latest_date=db_date_to_api(r["latest_date"]),
+            earliest_date=r["earliest_date"],
+            latest_date=r["latest_date"],
             latest_nav=latest_nav,
             anomalous_count=r["anomalous_count"] or 0,
             strategy_l1=r["strategy_l1"],
@@ -813,9 +794,9 @@ def search_funds(
     pattern = f"%{q}%"
     rows = conn.execute(
         """
-        SELECT fund_id, 产品代码, 产品名称, 首次录入时间
+        SELECT fund_id, fund_code, fund_name, created_at
         FROM funds
-        WHERE 产品代码 LIKE ? OR 产品名称 LIKE ?
+        WHERE fund_code LIKE ? OR fund_name LIKE ?
         ORDER BY fund_id
         LIMIT ?
         """,
@@ -825,9 +806,9 @@ def search_funds(
     items = [
         FundSummary(
             fund_id=r["fund_id"],
-            product_code=r["产品代码"],
-            product_name=r["产品名称"],
-            first_entry_time=r["首次录入时间"],
+            product_code=r["fund_code"],
+            product_name=r["fund_name"],
+            first_entry_time=r["created_at"],
         )
         for r in rows
     ]
@@ -864,19 +845,19 @@ def get_fund_returns(
     import datetime as _dt
     today = _dt.date.today()
     if max_days < 99999:
-        cutoff = (today - _dt.timedelta(days=max_days + 30)).strftime("%Y%m%d")
+        cutoff = (today - _dt.timedelta(days=max_days + 30)).strftime("%Y-%m-%d")
     else:
-        cutoff = "19000101"
+        cutoff = "1900-01-01"
 
     rows = conn.execute(
         """
-        SELECT n.fund_id, n.净值日期 AS nav_date, n.单位净值 AS unit_nav
+        SELECT n.fund_id, n.nav_date, n.unit_nav
         FROM fund_nav_data n
-        WHERE n.净值日期 >= ?
-          AND n.单位净值 IS NOT NULL
-          AND n.单位净值 > 0
-          AND n.单位净值 <= 5
-        ORDER BY n.fund_id, n.净值日期
+        WHERE n.nav_date >= ?
+          AND n.unit_nav IS NOT NULL
+          AND n.unit_nav > 0
+          AND n.unit_nav <= 5
+        ORDER BY n.fund_id, n.nav_date
         """,
         [cutoff],
     ).fetchall()
@@ -897,7 +878,7 @@ def get_fund_returns(
             return (last_nav - first_nav) / first_nav * 100 if first_nav > 0 else None
 
         if period_code == "ytd":
-            year_start = last_date_str[:4] + "0101"
+            year_start = last_date_str[:4] + "-01-01"
             for d, v in series:
                 if d >= year_start and v > 0:
                     return (last_nav - v) / v * 100
@@ -908,7 +889,7 @@ def get_fund_returns(
         if days is None:
             return None
 
-        target = (today - _dt.timedelta(days=days)).strftime("%Y%m%d")
+        target = (today - _dt.timedelta(days=days)).strftime("%Y-%m-%d")
         # Find nearest data point on or after target
         for d, v in series:
             if d >= target and v > 0:
@@ -921,7 +902,7 @@ def get_fund_returns(
         for p in period_list:
             entry[p] = _period_return(series, p)
         # Sparkline: sample up to 30 points from recent 90 days
-        cutoff_90 = (today - _dt.timedelta(days=90)).strftime("%Y%m%d")
+        cutoff_90 = (today - _dt.timedelta(days=90)).strftime("%Y-%m-%d")
         recent = [(d, v) for d, v in series if d >= cutoff_90]
         if len(recent) > 30:
             step = len(recent) / 30
@@ -958,8 +939,8 @@ def _compute_fund_metrics(series: list) -> dict:
         return {}
 
     try:
-        d0 = _dt_module.date(int(dates[0][:4]), int(dates[0][4:6]), int(dates[0][6:8]))
-        d1 = _dt_module.date(int(dates[-1][:4]), int(dates[-1][4:6]), int(dates[-1][6:8]))
+        d0 = _dt_module.date.fromisoformat(dates[0])
+        d1 = _dt_module.date.fromisoformat(dates[-1])
         total_days = max(1, (d1 - d0).days)
     except Exception:
         total_days = len(series)
@@ -1006,7 +987,7 @@ def _compute_fund_metrics(series: list) -> dict:
     monthly_rets = []
     month_start_idx = 0
     for i in range(1, len(dates)):
-        if dates[i][:6] != dates[i - 1][:6]:
+        if dates[i][:7] != dates[i - 1][:7]:   # YYYY-MM changed
             start_nav = vals[month_start_idx]
             end_nav = vals[i - 1]
             if start_nav > 0:
@@ -1046,19 +1027,19 @@ def get_fund_metrics_summary(
 
     today = _dt_mod.date.today()
     if max_days < 99999:
-        cutoff = (today - _dt_mod.timedelta(days=max_days + 30)).strftime("%Y%m%d")
+        cutoff = (today - _dt_mod.timedelta(days=max_days + 30)).strftime("%Y-%m-%d")
     else:
-        cutoff = "19000101"
+        cutoff = "1900-01-01"
 
     rows = conn.execute(
         """
-        SELECT n.fund_id, n.净值日期 AS nav_date, n.单位净值 AS unit_nav
+        SELECT n.fund_id, n.nav_date, n.unit_nav
         FROM fund_nav_data n
-        WHERE n.净值日期 >= ?
-          AND n.单位净值 IS NOT NULL
-          AND n.单位净值 > 0
-          AND n.单位净值 <= 5
-        ORDER BY n.fund_id, n.净值日期
+        WHERE n.nav_date >= ?
+          AND n.unit_nav IS NOT NULL
+          AND n.unit_nav > 0
+          AND n.unit_nav <= 5
+        ORDER BY n.fund_id, n.nav_date
         """,
         [cutoff],
     ).fetchall()
@@ -1120,11 +1101,11 @@ def get_fund(fund_id: int, conn: sqlite3.Connection = Depends(get_db)):
     row = conn.execute(
         """
         SELECT
-            f.fund_id, f.产品代码, f.产品名称, f.首次录入时间,
+            f.fund_id, f.fund_code, f.fund_name, f.created_at,
             f.benchmark_index, f.strategy_l1, f.strategy_l2,
             COUNT(n.id) AS record_count,
-            MIN(n.净值日期) AS earliest_date,
-            MAX(n.净值日期) AS latest_date
+            MIN(n.nav_date) AS earliest_date,
+            MAX(n.nav_date) AS latest_date
         FROM funds f
         LEFT JOIN fund_nav_data n ON f.fund_id = n.fund_id
         WHERE f.fund_id = ?
@@ -1139,7 +1120,7 @@ def get_fund(fund_id: int, conn: sqlite3.Connection = Depends(get_db)):
     latest_nav: Optional[float] = None
     if row["latest_date"]:
         nav_row = conn.execute(
-            "SELECT 单位净值 FROM fund_nav_data WHERE fund_id = ? AND 净值日期 = ? LIMIT 1",
+            "SELECT unit_nav FROM fund_nav_data WHERE fund_id = ? AND nav_date = ? LIMIT 1",
             (fund_id, row["latest_date"]),
         ).fetchone()
         if nav_row:
@@ -1150,12 +1131,12 @@ def get_fund(fund_id: int, conn: sqlite3.Connection = Depends(get_db)):
 
     return FundDetail(
         fund_id=row["fund_id"],
-        product_code=row["产品代码"],
-        product_name=row["产品名称"],
-        first_entry_time=row["首次录入时间"],
+        product_code=row["fund_code"],
+        product_name=row["fund_name"],
+        first_entry_time=row["created_at"],
         record_count=row["record_count"] or 0,
-        earliest_date=db_date_to_api(row["earliest_date"]),
-        latest_date=db_date_to_api(row["latest_date"]),
+        earliest_date=row["earliest_date"],
+        latest_date=row["latest_date"],
         latest_nav=latest_nav,
         benchmark_index=row["benchmark_index"],
         strategy_l1=row["strategy_l1"],
@@ -1182,7 +1163,7 @@ def get_fund_nav(
 
     # Validate date range
     if date_from and date_to:
-        if api_date_to_db(date_from) > api_date_to_db(date_to):
+        if date_from > date_to:
             raise NavAPIError(400, "date_from must not be after date_to", "BAD_REQUEST")
 
     # Build WHERE clause dynamically
@@ -1192,11 +1173,11 @@ def get_fund_nav(
     conditions.append("1=1" + quality_filter_sql(apply_filter))
 
     if date_from:
-        conditions.append("净值日期 >= ?")
-        params.append(api_date_to_db(date_from))
+        conditions.append("nav_date >= ?")
+        params.append(date_from)
     if date_to:
-        conditions.append("净值日期 <= ?")
-        params.append(api_date_to_db(date_to))
+        conditions.append("nav_date <= ?")
+        params.append(date_to)
 
     where_clause = " AND ".join(conditions)
 
@@ -1207,10 +1188,10 @@ def get_fund_nav(
 
     rows = conn.execute(
         f"""
-        SELECT id, fund_id, 产品名称, 产品代码, 净值日期, 单位净值, 累计单位净值, adjusted_nav, 插入时间, source_id
+        SELECT id, fund_id, fund_name, fund_code, nav_date, unit_nav, accum_nav, adj_nav, "录入时间", source_id
         FROM fund_nav_data
         WHERE {where_clause}
-        ORDER BY 净值日期 ASC
+        ORDER BY nav_date ASC
         LIMIT ? OFFSET ?
         """,
         params + [limit, offset],
@@ -1228,16 +1209,16 @@ def get_fund_nav(
 @app.post("/api/nav", response_model=NavRecord, status_code=status.HTTP_201_CREATED, tags=["nav"])
 def create_nav(body: NavCreateRequest, conn: sqlite3.Connection = Depends(get_db)):
     fund_id = get_or_create_fund_id(conn, body.product_code, body.product_name)
-    db_date = api_date_to_db(body.nav_date)
 
     cursor = conn.cursor()
     cursor.execute(
         """
         INSERT OR IGNORE INTO fund_nav_data
-            (fund_id, 产品名称, 产品代码, 净值日期, 单位净值, 累计单位净值, source_id)
-        VALUES (?, ?, ?, ?, ?, ?, NULL)
+            (fund_id, fund_name, fund_code, nav_date, unit_nav, accum_nav, source_id, data_source)
+        VALUES (?, ?, ?, ?, ?, ?, NULL, 'manual')
         """,
-        (fund_id, body.product_name, body.product_code, db_date, body.unit_nav, body.accumulated_nav),
+        (fund_id, body.product_name, body.product_code,
+         body.nav_date, body.unit_nav, body.accumulated_nav),
     )
 
     if cursor.rowcount == 0:
@@ -1251,7 +1232,7 @@ def create_nav(body: NavCreateRequest, conn: sqlite3.Connection = Depends(get_db
     conn.commit()
 
     row = conn.execute(
-        "SELECT id, fund_id, 产品名称, 产品代码, 净值日期, 单位净值, 累计单位净值, adjusted_nav, 插入时间, source_id "
+        'SELECT id, fund_id, fund_name, fund_code, nav_date, unit_nav, accum_nav, adj_nav, "录入时间", source_id '
         "FROM fund_nav_data WHERE id = ?",
         (new_id,),
     ).fetchone()
@@ -1263,7 +1244,7 @@ def create_nav(body: NavCreateRequest, conn: sqlite3.Connection = Depends(get_db
 @app.get("/api/nav/{nav_id}", response_model=NavRecord, tags=["nav"])
 def get_nav(nav_id: int, conn: sqlite3.Connection = Depends(get_db)):
     row = conn.execute(
-        "SELECT id, fund_id, 产品名称, 产品代码, 净值日期, 单位净值, 累计单位净值, adjusted_nav, 插入时间, source_id "
+        'SELECT id, fund_id, fund_name, fund_code, nav_date, unit_nav, accum_nav, adj_nav, "录入时间", source_id '
         "FROM fund_nav_data WHERE id = ?",
         (nav_id,),
     ).fetchone()
@@ -1277,7 +1258,7 @@ def get_nav(nav_id: int, conn: sqlite3.Connection = Depends(get_db)):
 @app.put("/api/nav/{nav_id}", response_model=NavRecord, tags=["nav"])
 def update_nav(nav_id: int, body: NavUpdateRequest, conn: sqlite3.Connection = Depends(get_db)):
     existing = conn.execute(
-        "SELECT id, fund_id, 产品名称, 产品代码, 净值日期, 单位净值, 累计单位净值, adjusted_nav, 插入时间, source_id "
+        'SELECT id, fund_id, fund_name, fund_code, nav_date, unit_nav, accum_nav, adj_nav, "录入时间", source_id '
         "FROM fund_nav_data WHERE id = ?",
         (nav_id,),
     ).fetchone()
@@ -1285,22 +1266,22 @@ def update_nav(nav_id: int, body: NavUpdateRequest, conn: sqlite3.Connection = D
         raise NavAPIError(404, f"NAV record {nav_id} not found", "NOT_FOUND")
 
     # Determine effective values after update
-    new_product_name = body.product_name if body.product_name is not None else existing["产品名称"]
-    new_nav_date = api_date_to_db(body.nav_date) if body.nav_date is not None else existing["净值日期"]
-    new_unit_nav = body.unit_nav if body.unit_nav is not None else existing["单位净值"]
-    new_accumulated_nav = body.accumulated_nav if body.accumulated_nav is not None else existing["累计单位净值"]
-    new_product_code = existing["产品代码"]  # product_code is immutable via this endpoint
+    new_product_name = body.product_name if body.product_name is not None else existing["fund_name"]
+    new_nav_date = body.nav_date if body.nav_date is not None else existing["nav_date"]
+    new_unit_nav = body.unit_nav if body.unit_nav is not None else existing["unit_nav"]
+    new_accumulated_nav = body.accumulated_nav if body.accumulated_nav is not None else existing["accum_nav"]
+    new_fund_code = existing["fund_code"]  # fund_code is immutable via this endpoint
 
     # Check for uniqueness conflict when date changes
-    if body.nav_date is not None and new_nav_date != existing["净值日期"]:
+    if body.nav_date is not None and new_nav_date != existing["nav_date"]:
         conflict = conn.execute(
-            "SELECT id FROM fund_nav_data WHERE 产品代码 = ? AND 净值日期 = ? AND id != ?",
-            (new_product_code, new_nav_date, nav_id),
+            "SELECT id FROM fund_nav_data WHERE fund_code = ? AND nav_date = ? AND id != ?",
+            (new_fund_code, new_nav_date, nav_id),
         ).fetchone()
         if conflict:
             raise NavAPIError(
                 409,
-                f"A record for product_code={new_product_code} on {body.nav_date} already exists",
+                f"A record for product_code={new_fund_code} on {body.nav_date} already exists",
                 "DUPLICATE_RECORD",
             )
 
@@ -1308,20 +1289,19 @@ def update_nav(nav_id: int, body: NavUpdateRequest, conn: sqlite3.Connection = D
     params = []
 
     if body.product_name is not None:
-        set_clauses.append("产品名称 = ?")
+        set_clauses.append("fund_name = ?")
         params.append(new_product_name)
     if body.nav_date is not None:
-        set_clauses.append("净值日期 = ?")
+        set_clauses.append("nav_date = ?")
         params.append(new_nav_date)
     if body.unit_nav is not None:
-        set_clauses.append("单位净值 = ?")
+        set_clauses.append("unit_nav = ?")
         params.append(new_unit_nav)
     if body.accumulated_nav is not None:
-        set_clauses.append("累计单位净值 = ?")
+        set_clauses.append("accum_nav = ?")
         params.append(new_accumulated_nav)
 
     if not set_clauses:
-        # Nothing to update — return existing record as-is
         return nav_row_to_model(existing)
 
     params.append(nav_id)
@@ -1332,7 +1312,7 @@ def update_nav(nav_id: int, body: NavUpdateRequest, conn: sqlite3.Connection = D
     conn.commit()
 
     updated = conn.execute(
-        "SELECT id, fund_id, 产品名称, 产品代码, 净值日期, 单位净值, 累计单位净值, adjusted_nav, 插入时间, source_id "
+        'SELECT id, fund_id, fund_name, fund_code, nav_date, unit_nav, accum_nav, adj_nav, "录入时间", source_id '
         "FROM fund_nav_data WHERE id = ?",
         (nav_id,),
     ).fetchone()
@@ -1369,14 +1349,14 @@ def compare_funds(
         raise NavAPIError(400, "At most 20 fund_ids are allowed per compare request", "BAD_REQUEST")
 
     if date_from and date_to:
-        if api_date_to_db(date_from) > api_date_to_db(date_to):
+        if date_from > date_to:
             raise NavAPIError(400, "date_from must not be after date_to", "BAD_REQUEST")
 
     result: Dict[int, FundNavSeries] = {}
 
     for fid in unique_ids:
         fund_row = conn.execute(
-            "SELECT fund_id, 产品代码, 产品名称 FROM funds WHERE fund_id = ?", (fid,)
+            "SELECT fund_id, fund_code, fund_name FROM funds WHERE fund_id = ?", (fid,)
         ).fetchone()
         if not fund_row:
             raise NavAPIError(404, f"Fund {fid} not found", "NOT_FOUND")
@@ -1386,36 +1366,36 @@ def compare_funds(
         conditions.append("1=1" + quality_filter_sql(apply_filter))
 
         if date_from:
-            conditions.append("净值日期 >= ?")
-            params.append(api_date_to_db(date_from))
+            conditions.append("nav_date >= ?")
+            params.append(date_from)
         if date_to:
-            conditions.append("净值日期 <= ?")
-            params.append(api_date_to_db(date_to))
+            conditions.append("nav_date <= ?")
+            params.append(date_to)
 
         where_clause = " AND ".join(conditions)
         rows = conn.execute(
             f"""
-            SELECT 净值日期, 单位净值, 累计单位净值
+            SELECT nav_date, unit_nav, accum_nav
             FROM fund_nav_data
             WHERE {where_clause}
-            ORDER BY 净值日期 ASC
+            ORDER BY nav_date ASC
             """,
             params,
         ).fetchall()
 
         series = [
             NavDataPoint(
-                date=db_date_to_api(r["净值日期"]),
-                nav=r["单位净值"],
-                accumulated_nav=r["累计单位净值"],
+                date=r["nav_date"],
+                nav=r["unit_nav"],
+                accumulated_nav=r["accum_nav"],
             )
             for r in rows
         ]
 
         result[fid] = FundNavSeries(
             fund_id=fund_row["fund_id"],
-            product_code=fund_row["产品代码"],
-            product_name=fund_row["产品名称"],
+            product_code=fund_row["fund_code"],
+            product_name=fund_row["fund_name"],
             series=series,
         )
 
