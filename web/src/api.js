@@ -204,6 +204,40 @@ export async function fetchFundMetrics(opts = {}, signal) {
   return apiFetch(`/api/funds/metrics/summary${qs ? '?' + qs : ''}`, signal)
 }
 
+export async function createPortfolio(payload) {
+  const res = await fetch('/api/portfolios', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}))
+    throw new Error(body.detail || `HTTP ${res.status}`)
+  }
+  return res.json()
+}
+
+export async function calculatePortfolio(id) {
+  const res = await fetch(`/api/portfolios/${id}/calculate`, { method: 'POST' })
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}))
+    throw new Error(body.detail || `HTTP ${res.status}`)
+  }
+  return res.json()
+}
+
+export async function fetchPortfolio(id, signal) {
+  return apiFetch(`/api/portfolios/${id}`, signal)
+}
+
+export async function fetchPortfolioNav(id, signal) {
+  return apiFetch(`/api/portfolios/${id}/nav`, signal)
+}
+
+export async function fetchPortfolioMetrics(id, signal) {
+  return apiFetch(`/api/portfolios/${id}/metrics`, signal)
+}
+
 export async function setFundBenchmark(fundId, benchmarkIndex) {
   const res = await fetch(`/api/funds/${fundId}/benchmark`, {
     method: 'PUT',

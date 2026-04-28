@@ -5,8 +5,9 @@ const NAV_ITEMS = [
   { to: '/', icon: 'analytics', label: '基金' },
   { to: '/market', icon: 'trending_up', label: '市场' },
   { to: '/compare', icon: 'compare_arrows', label: '基金对比' },
+  { to: '/portfolios/new', icon: 'account_balance_wallet', label: '组合管理' },
   { to: '/basis', icon: 'show_chart', label: '基差分析' },
-  { to: '/crude', icon: 'local_gas_station', label: '原油' },
+  // { to: '/crude', icon: 'local_gas_station', label: '原油' },
 ]
 
 function SidebarLink({ to, icon, label }) {

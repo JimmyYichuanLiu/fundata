@@ -15,7 +15,11 @@ function filterByDays(items, days) {
   if (!items || items.length === 0) return []
   if (days === 0) return items
   const last = items[items.length - 1].nav_date
-  const d = new Date(last)
+  const normalized = /^\d{8}$/.test(last)
+    ? `${last.slice(0,4)}-${last.slice(4,6)}-${last.slice(6,8)}`
+    : last
+  const d = new Date(`${normalized}T00:00:00`)
+  if (Number.isNaN(d.getTime())) return items
   d.setDate(d.getDate() - days)
   const from = d.toISOString().slice(0, 10)
   return items.filter(i => i.nav_date >= from)
@@ -152,7 +156,7 @@ export default function ComparisonMetrics({
       ))}
 
       <p className="text-xs text-gray-400 text-center">
-        {absMetrics[0]?.fm?.days != null ? `区间约 ${absMetrics[0].fm.days} 天 · ` : ''}无风险利率 2.5%
+        {absMetrics[0]?.fm?.days != null ? `区间约 ${absMetrics[0].fm.days} 天 · ` : ''}无风险利率 1.75%
         {excessMode ? ` · 超额基准: ${baseLabel}（几何超额）` : ''}
       </p>
     </div>

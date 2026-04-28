@@ -178,6 +178,8 @@ def _init_db_schema():
         conn.execute('CREATE INDEX IF NOT EXISTS idx_fund_code ON fund_nav_data(fund_code)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_nav_date  ON fund_nav_data(nav_date)')
 
+        _ensure_portfolio_tables(conn)
+
     logger.info("Database schema initialised at %s", DB_PATH)
 
 
@@ -199,13 +201,16 @@ async def lifespan(app: FastAPI):
             _scheduler.add_job(_run_market_5min_sync, "interval", minutes=5)
     if _CRUDE_ENABLED:
         # 原油数据：收盘后 15:20 更新
-        _scheduler.add_job(_run_crude_sync, "cron", hour=15, minute=20)
+        # _scheduler.add_job(_run_crude_sync, "cron", hour=15, minute=20)
+        pass
     if _NEWS_ENABLED:
         # 新闻同步：每 2 小时抓取一次 RSS
-        _scheduler.add_job(_run_news_sync_bg, "interval", hours=2)
+        # _scheduler.add_job(_run_news_sync_bg, "interval", hours=2)
+        pass
     if _HORMUZ_ENABLED:
         # AIS 采集：每 30 分钟一次
-        _scheduler.add_job(_run_ais_sync_bg, "interval", minutes=30)
+        # _scheduler.add_job(_run_ais_sync_bg, "interval", minutes=30)
+        pass
     _scheduler.start()
     logger.info("Scheduler started")
     yield
@@ -229,15 +234,18 @@ app.add_middleware(
 
 # 挂载原油路由（独立模块）
 if _CRUDE_ENABLED:
-    app.include_router(_crude_router)
+    # app.include_router(_crude_router)
+    pass
 
 # 挂载新闻路由（独立模块）
 if _NEWS_ENABLED:
-    app.include_router(_news_router)
+    # app.include_router(_news_router)
+    pass
 
 # 挂载霍尔木兹路由（独立模块）
 if _HORMUZ_ENABLED:
-    app.include_router(_hormuz_router)
+    # app.include_router(_hormuz_router)
+    pass
 
 # =============================================================================
 # Section 4: Pydantic Models
@@ -618,10 +626,16 @@ def _compute_issues(conn, fund_id: int) -> dict:
            ORDER BY nav_date ASC""",
         (fund_id,)
     ).fetchall()
-    anomalous = [
-        {"nav_date": r[0], "unit_nav": float(r[1])}
-        for r in rows if r[1] is not None and float(r[1]) > 5
-    ]
+    anomalous = []
+    for r in rows:
+        if r[1] is None:
+            continue
+        try:
+            nav_val = float(str(r[1]).replace(",", ""))
+        except (ValueError, TypeError):
+            continue
+        if nav_val > 5:
+            anomalous.append({"nav_date": r[0], "unit_nav": nav_val})
     gaps = []
     dates = [r[0] for r in rows]
     if len(dates) >= 3:
@@ -1919,6 +1933,326 @@ def trigger_market_sync(background_tasks: BackgroundTasks):
         raise NavAPIError(503, "Market data module not available (akshare not installed)", "NOT_AVAILABLE")
     background_tasks.add_task(_run_market_sync)
     return {"message": "market sync started"}
+
+
+# --- Portfolio MVP -----------------------------------------------------------
+
+class PortfolioConstituentIn(BaseModel):
+    fund_id: int
+    target_amount: Optional[float] = None
+    target_weight: Optional[float] = None
+    effective_date: str
+
+
+class PortfolioCreateIn(BaseModel):
+    portfolio_name: str
+    build_method: str
+    description: Optional[str] = None
+    constituents: List[PortfolioConstituentIn]
+
+
+class PortfolioUpdateIn(PortfolioCreateIn):
+    pass
+
+
+def _ensure_portfolio_tables(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS portfolio_master (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            portfolio_code TEXT UNIQUE NOT NULL,
+            portfolio_name TEXT NOT NULL,
+            description TEXT,
+            build_method TEXT NOT NULL CHECK (build_method IN ('BATCH_INCLUDE','UNIFIED_START')),
+            status TEXT NOT NULL DEFAULT 'ACTIVE',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS portfolio_constituents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            portfolio_id INTEGER NOT NULL,
+            fund_id INTEGER NOT NULL,
+            fund_code TEXT NOT NULL,
+            target_amount REAL,
+            target_weight REAL,
+            effective_date TEXT NOT NULL,
+            include_order INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(portfolio_id, fund_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS portfolio_nav_cache (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            portfolio_id INTEGER NOT NULL,
+            nav_date TEXT NOT NULL,
+            portfolio_nav REAL NOT NULL,
+            total_asset REAL NOT NULL,
+            is_rebalance_day INTEGER NOT NULL DEFAULT 0,
+            included_fund_count INTEGER NOT NULL,
+            calc_version INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(portfolio_id, nav_date, calc_version)
+        );
+        """
+    )
+
+
+def _now_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def _portfolio_series_by_fund(conn: sqlite3.Connection, fund_id: int) -> dict:
+    rows = conn.execute(
+        """
+        SELECT nav_date, COALESCE(adj_nav, unit_nav) AS nav
+        FROM fund_nav_data
+        WHERE fund_id = ? AND COALESCE(adj_nav, unit_nav) IS NOT NULL
+        ORDER BY nav_date ASC
+        """,
+        (fund_id,),
+    ).fetchall()
+    return {r["nav_date"]: float(r["nav"]) for r in rows}
+
+
+def _calculate_unified_start(constituents: list, nav_maps: dict) -> list:
+    # t0 = latest of each fund's first available NAV date (>= its effective_date)
+    fund_starts = []
+    for c in constituents:
+        fid = c["fund_id"]
+        eff = c["effective_date"]
+        first = next((d for d in sorted(nav_maps[fid].keys()) if d >= eff), None)
+        if first is None:
+            raise NavAPIError(400, f"Fund {fid} has no nav on or after effective_date={eff}", "BAD_REQUEST")
+        fund_starts.append(first)
+    t0 = max(fund_starts)
+    all_dates = sorted({d for m in nav_maps.values() for d in m.keys() if d >= t0})
+    base = {}
+    for c in constituents:
+        fid = c["fund_id"]
+        # Use the closest available NAV on or after t0 as the base
+        base_nav = next((nav_maps[fid][d] for d in sorted(nav_maps[fid].keys()) if d >= t0), None)
+        if base_nav is None:
+            raise NavAPIError(400, f"Fund {fid} has no nav on or after t0={t0}", "BAD_REQUEST")
+        base[fid] = base_nav
+    items = []
+    for d in all_dates:
+        val = 0.0
+        included = 0
+        for c in constituents:
+            fid = c["fund_id"]
+            w = float(c["target_weight"] or 0.0)
+            if d in nav_maps[fid]:
+                included += 1
+                val += w * (nav_maps[fid][d] / base[fid])
+        if included > 0:
+            items.append({"nav_date": d, "portfolio_nav": val, "total_asset": val, "is_rebalance_day": 0, "included_fund_count": included})
+    return items
+
+
+def _calculate_batch_include(constituents: list, nav_maps: dict) -> list:
+    constituents = sorted(constituents, key=lambda x: x["effective_date"])
+    t0 = min(c["effective_date"] for c in constituents)
+    all_dates = sorted({d for m in nav_maps.values() for d in m.keys() if d >= t0})
+    shares = {}
+    total_asset = 1.0
+    base_asset = None
+    items = []
+
+    last_nav: dict[int, float] = {}  # LOCF cache: fid -> last known nav
+
+    for d in all_dates:
+        # Update LOCF cache for all funds that have data on this date
+        for fid, nmap in nav_maps.items():
+            if d in nmap:
+                last_nav[fid] = nmap[d]
+
+        active = [c for c in constituents if c["effective_date"] <= d and d in nav_maps[c["fund_id"]]]
+        if not active:
+            continue
+        # Trigger rebalance if first day, or any new fund joins that wasn't in shares yet
+        new_fund_joined = any(c["fund_id"] not in shares for c in active)
+        rebalance = (len(items) == 0) or new_fund_joined
+        if rebalance:
+            total_target = sum(float(c["target_amount"] or 0.0) for c in active)
+            if total_target <= 0:
+                raise NavAPIError(400, "target_amount must be > 0 for BATCH_INCLUDE", "BAD_REQUEST")
+            new_shares = {}
+            for c in active:
+                fid = c["fund_id"]
+                w = float(c["target_amount"] or 0.0) / total_target
+                alloc = total_asset * w
+                new_shares[fid] = alloc / nav_maps[fid][d]
+            shares = new_shares
+        total_asset = 0.0
+        for c in active:
+            fid = c["fund_id"]
+            if fid not in shares:
+                continue  # fund active but never rebalanced in — skip
+            nav_val = nav_maps[fid].get(d, last_nav.get(fid))
+            if nav_val is None:
+                continue  # no NAV available at all — skip
+            total_asset += shares[fid] * nav_val
+        if base_asset is None:
+            base_asset = total_asset
+        items.append({
+            "nav_date": d,
+            "portfolio_nav": total_asset / base_asset,
+            "total_asset": total_asset,
+            "is_rebalance_day": 1 if rebalance else 0,
+            "included_fund_count": len(active),
+        })
+    return items
+
+
+def _get_portfolio_constituents(conn: sqlite3.Connection, portfolio_id: int) -> list:
+    rows = conn.execute(
+        """
+        SELECT portfolio_id, fund_id, fund_code, target_amount, target_weight, effective_date, include_order
+        FROM portfolio_constituents WHERE portfolio_id=? ORDER BY include_order ASC
+        """,
+        (portfolio_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/portfolios", tags=["portfolio"])
+def create_portfolio(body: PortfolioCreateIn, conn: sqlite3.Connection = Depends(get_db)):
+    _ensure_portfolio_tables(conn)
+    now = _now_iso()
+    code = datetime.now().strftime("PF%Y%m%d%H%M%S%f")
+    cur = conn.execute(
+        """
+        INSERT INTO portfolio_master(portfolio_code, portfolio_name, description, build_method, status, created_at, updated_at)
+        VALUES(?,?,?,?,?,?,?)
+        """,
+        (code, body.portfolio_name, body.description, body.build_method, "ACTIVE", now, now),
+    )
+    pid = cur.lastrowid
+    for idx, c in enumerate(body.constituents, start=1):
+        f = conn.execute("SELECT fund_code FROM funds WHERE fund_id=?", (c.fund_id,)).fetchone()
+        if not f:
+            raise NavAPIError(404, f"Fund {c.fund_id} not found", "NOT_FOUND")
+        conn.execute(
+            """
+            INSERT INTO portfolio_constituents(portfolio_id, fund_id, fund_code, target_amount, target_weight, effective_date, include_order, created_at, updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?)
+            """,
+            (pid, c.fund_id, f["fund_code"], c.target_amount, c.target_weight, c.effective_date, idx, now, now),
+        )
+    return {"id": pid, "portfolio_code": code, "portfolio_name": body.portfolio_name}
+
+
+@app.get("/api/portfolios", tags=["portfolio"])
+def list_portfolios(conn: sqlite3.Connection = Depends(get_db)):
+    _ensure_portfolio_tables(conn)
+    rows = conn.execute("SELECT id, portfolio_code, portfolio_name, build_method, updated_at FROM portfolio_master WHERE status='ACTIVE' ORDER BY id DESC").fetchall()
+    return {"items": [dict(r) for r in rows]}
+
+
+@app.get("/api/portfolios/{portfolio_id}", tags=["portfolio"])
+def get_portfolio(portfolio_id: int, conn: sqlite3.Connection = Depends(get_db)):
+    _ensure_portfolio_tables(conn)
+    row = conn.execute("SELECT * FROM portfolio_master WHERE id=?", (portfolio_id,)).fetchone()
+    if not row:
+        raise NavAPIError(404, f"Portfolio {portfolio_id} not found", "NOT_FOUND")
+    data = dict(row)
+    data["constituents"] = _get_portfolio_constituents(conn, portfolio_id)
+    return data
+
+
+@app.put("/api/portfolios/{portfolio_id}", tags=["portfolio"])
+def update_portfolio(portfolio_id: int, body: PortfolioUpdateIn, conn: sqlite3.Connection = Depends(get_db)):
+    _ensure_portfolio_tables(conn)
+    row = conn.execute("SELECT id FROM portfolio_master WHERE id=?", (portfolio_id,)).fetchone()
+    if not row:
+        raise NavAPIError(404, f"Portfolio {portfolio_id} not found", "NOT_FOUND")
+    now = _now_iso()
+    conn.execute("UPDATE portfolio_master SET portfolio_name=?, description=?, build_method=?, updated_at=? WHERE id=?", (body.portfolio_name, body.description, body.build_method, now, portfolio_id))
+    conn.execute("DELETE FROM portfolio_constituents WHERE portfolio_id=?", (portfolio_id,))
+    for idx, c in enumerate(body.constituents, start=1):
+        f = conn.execute("SELECT fund_code FROM funds WHERE fund_id=?", (c.fund_id,)).fetchone()
+        if not f:
+            raise NavAPIError(404, f"Fund {c.fund_id} not found", "NOT_FOUND")
+        conn.execute(
+            """
+            INSERT INTO portfolio_constituents(portfolio_id, fund_id, fund_code, target_amount, target_weight, effective_date, include_order, created_at, updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?)
+            """,
+            (portfolio_id, c.fund_id, f["fund_code"], c.target_amount, c.target_weight, c.effective_date, idx, now, now),
+        )
+    return get_portfolio(portfolio_id, conn)
+
+
+@app.delete("/api/portfolios/{portfolio_id}", tags=["portfolio"])
+def delete_portfolio(portfolio_id: int, conn: sqlite3.Connection = Depends(get_db)):
+    _ensure_portfolio_tables(conn)
+    conn.execute("UPDATE portfolio_master SET status='ARCHIVED', updated_at=? WHERE id=?", (_now_iso(), portfolio_id))
+    return {"ok": True}
+
+
+@app.post("/api/portfolios/{portfolio_id}/calculate", tags=["portfolio"])
+def calculate_portfolio(portfolio_id: int, conn: sqlite3.Connection = Depends(get_db)):
+    _ensure_portfolio_tables(conn)
+    p = conn.execute("SELECT * FROM portfolio_master WHERE id=?", (portfolio_id,)).fetchone()
+    if not p:
+        raise NavAPIError(404, f"Portfolio {portfolio_id} not found", "NOT_FOUND")
+    constituents = _get_portfolio_constituents(conn, portfolio_id)
+    if len(constituents) < 2:
+        raise NavAPIError(400, "Portfolio requires at least 2 constituents", "BAD_REQUEST")
+    nav_maps = {c["fund_id"]: _portfolio_series_by_fund(conn, c["fund_id"]) for c in constituents}
+
+    if p["build_method"] == "UNIFIED_START":
+        items = _calculate_unified_start(constituents, nav_maps)
+    else:
+        items = _calculate_batch_include(constituents, nav_maps)
+
+    last_ver = conn.execute("SELECT COALESCE(MAX(calc_version),0) FROM portfolio_nav_cache WHERE portfolio_id=?", (portfolio_id,)).fetchone()[0]
+    ver = int(last_ver) + 1
+    now = _now_iso()
+    for it in items:
+        conn.execute(
+            """
+            INSERT INTO portfolio_nav_cache(portfolio_id, nav_date, portfolio_nav, total_asset, is_rebalance_day, included_fund_count, calc_version, created_at)
+            VALUES(?,?,?,?,?,?,?,?)
+            """,
+            (portfolio_id, it["nav_date"], it["portfolio_nav"], it["total_asset"], it["is_rebalance_day"], it["included_fund_count"], ver, now),
+        )
+    return {"portfolio_id": portfolio_id, "calc_version": ver, "rows": len(items)}
+
+
+@app.get("/api/portfolios/{portfolio_id}/nav", tags=["portfolio"])
+def get_portfolio_nav(portfolio_id: int, conn: sqlite3.Connection = Depends(get_db)):
+    _ensure_portfolio_tables(conn)
+    ver = conn.execute("SELECT MAX(calc_version) FROM portfolio_nav_cache WHERE portfolio_id=?", (portfolio_id,)).fetchone()[0]
+    if ver is None:
+        return {"items": []}
+    rows = conn.execute(
+        """
+        SELECT nav_date, portfolio_nav, total_asset, is_rebalance_day, included_fund_count
+        FROM portfolio_nav_cache
+        WHERE portfolio_id=? AND calc_version=?
+        ORDER BY nav_date ASC
+        """,
+        (portfolio_id, ver),
+    ).fetchall()
+    return {"items": [dict(r) for r in rows], "calc_version": ver}
+
+
+@app.get("/api/portfolios/{portfolio_id}/metrics", tags=["portfolio"])
+def get_portfolio_metrics(portfolio_id: int, conn: sqlite3.Connection = Depends(get_db)):
+    nav = get_portfolio_nav(portfolio_id, conn)
+    items = nav.get("items", [])
+    series = [(i["nav_date"], float(i["portfolio_nav"])) for i in items]
+    m = _compute_fund_metrics(series)
+    return {
+        "annualized_return": 0.0 if m.get("annualized_return") is None else m.get("annualized_return"),
+        "annualized_vol": 0.0 if m.get("annualized_vol") is None else m.get("annualized_vol"),
+        "max_drawdown": 0.0 if m.get("max_drawdown") is None else m.get("max_drawdown"),
+        "sharpe": 0.0 if m.get("sharpe") is None else m.get("sharpe"),
+        "monthly_win_rate": 0.0 if m.get("monthly_win_rate") is None else m.get("monthly_win_rate"),
+    }
 
 
 # =============================================================================

@@ -6,6 +6,7 @@ import {
   setFundStrategy,
 } from '../api.js'
 import { useCompare } from '../context/CompareContext.jsx'
+import { shouldShowPortfolioEntry } from '../utils/portfolio.js'
 
 // ── Strategy taxonomy ──
 const STRATEGY_TAXONOMY = [
@@ -1030,13 +1031,17 @@ export default function FundList() {
           onRemove={remove}
           onClear={clear}
           onCompare={() => navigate('/compare/v2')}
+          onPortfolio={() => {
+            const query = compareList.map(f => `fund_ids=${encodeURIComponent(String(f.fund_id))}`).join('&')
+            navigate(`/portfolios/new?${query}`)
+          }}
         />
       )}
     </>
   )
 }
 
-function ComparePanel({ compareList, onRemove, onClear, onCompare }) {
+function ComparePanel({ compareList, onRemove, onClear, onCompare, onPortfolio }) {
   return (
     <div className="fixed bottom-6 right-6 z-50 w-72 bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 flex flex-col overflow-hidden">
       <div className="px-4 py-3 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between">
@@ -1069,6 +1074,14 @@ function ComparePanel({ compareList, onRemove, onClear, onCompare }) {
         >
           基金对比
         </button>
+        {shouldShowPortfolioEntry(compareList.length) && (
+          <button
+            onClick={onPortfolio}
+            className="flex-1 py-2 text-xs bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors font-medium"
+          >
+            基金组合
+          </button>
+        )}
       </div>
     </div>
   )

@@ -33,7 +33,11 @@ export default function ComparisonChart({
       .filter(Boolean)
     if (allLast.length === 0) return ''
     const last = allLast.reduce((a, b) => (a > b ? a : b))
-    const d = new Date(last)
+    const normalized = /^\d{8}$/.test(last)
+      ? `${last.slice(0,4)}-${last.slice(4,6)}-${last.slice(6,8)}`
+      : last
+    const d = new Date(`${normalized}T00:00:00`)
+    if (Number.isNaN(d.getTime())) return ''
     d.setDate(d.getDate() - activeDays)
     return d.toISOString().slice(0, 10)
   }, [activeDays, navDataMap, commonStart])

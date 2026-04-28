@@ -37,6 +37,13 @@ const TABLE_METRICS = [
   { key: 'monthlyWinRate',   label: '月胜率',     format: 'pct' },
 ]
 
+function normalizeDate(dateStr) {
+  if (typeof dateStr !== 'string') return null
+  if (/^\d{8}$/.test(dateStr)) return `${dateStr.slice(0, 4)}-${dateStr.slice(4, 6)}-${dateStr.slice(6, 8)}`
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return dateStr
+  return null
+}
+
 function formatMetric(val, format) {
   if (val == null) return '—'
   if (format === 'pct') return `${val.toFixed(2)}%`
@@ -162,7 +169,10 @@ export default function FundComparison() {
     const dateSet = new Set()
     selectedFunds.forEach(fund => {
       const series = compareData.funds?.[fund.fund_id]?.series || []
-      series.forEach(s => dateSet.add(s.date))
+      series.forEach(s => {
+        const d = normalizeDate(s.date)
+        if (d) dateSet.add(d)
+      })
     })
     return Array.from(dateSet).sort()
   }, [compareData, selectedFunds])
@@ -180,8 +190,14 @@ export default function FundComparison() {
 
     const datasets = selectedFunds.map((fund, idx) => {
       const series = compareData.funds?.[fund.fund_id]?.series || []
-      const seriesMap = new Map(series.map(s => [s.date, s.nav]))
-      const baseVal = series.length > 0 && normalize !== 'absolute' ? series[0].nav : null
+      const normalizedSeries = series
+        .map(s => {
+          const d = normalizeDate(s.date)
+          return d ? { ...s, date: d } : null
+        })
+        .filter(Boolean)
+      const seriesMap = new Map(normalizedSeries.map(s => [s.date, s.nav]))
+      const baseVal = normalizedSeries.length > 0 && normalize !== 'absolute' ? normalizedSeries[0].nav : null
 
       const vals = visibleDates.map(date => {
         const v = seriesMap.get(date)
@@ -258,7 +274,12 @@ export default function FundComparison() {
     if (!compareData) return []
     return selectedFunds.map((fund, idx) => {
       const series = compareData.funds?.[fund.fund_id]?.series || []
-      const items = series.map(s => ({ nav_date: s.date, unit_nav: s.nav }))
+      const items = series
+        .map(s => {
+          const d = normalizeDate(s.date)
+          return d ? { nav_date: d, unit_nav: s.nav } : null
+        })
+        .filter(Boolean)
       return {
         fund,
         color: COLORS[idx % COLORS.length],

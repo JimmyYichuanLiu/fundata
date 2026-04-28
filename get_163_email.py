@@ -53,9 +53,9 @@ def init_database(db_path):
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS funds (
             fund_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            产品代码 TEXT NOT NULL UNIQUE,
-            产品名称 TEXT,
-            首次录入时间 DATETIME DEFAULT CURRENT_TIMESTAMP
+            fund_code TEXT NOT NULL UNIQUE,
+            fund_name TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
 
@@ -64,14 +64,14 @@ def init_database(db_path):
         CREATE TABLE IF NOT EXISTS fund_nav_data (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             fund_id INTEGER REFERENCES funds(fund_id),
-            产品名称 TEXT,
-            产品代码 TEXT NOT NULL,
-            净值日期 TEXT NOT NULL,
-            单位净值 REAL NOT NULL,
-            累计单位净值 REAL,
-            插入时间 DATETIME DEFAULT CURRENT_TIMESTAMP,
+            fund_name TEXT,
+            fund_code TEXT NOT NULL,
+            nav_date TEXT NOT NULL,
+            unit_nav REAL NOT NULL,
+            accum_nav REAL,
+            inserted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             source_id INTEGER REFERENCES email_sources(id),
-            UNIQUE(产品代码, 净值日期)
+            UNIQUE(fund_code, nav_date)
         )
     ''')
 
@@ -96,36 +96,36 @@ def init_database(db_path):
     except Exception:
         pass  # 列已存在则忽略
 
-    # 迁移：从现有 fund_nav_data 填充 funds 表（按首次插入时间排序，保证 fund_id 连续递增）
+    # 迁移：从现有 fund_nav_data 填充 funds 表
     cursor.execute('SELECT COUNT(*) FROM funds')
     if cursor.fetchone()[0] == 0:
         cursor.execute('''
-            INSERT OR IGNORE INTO funds (产品代码, 产品名称, 首次录入时间)
-            SELECT 产品代码, MIN(产品名称), MIN(插入时间)
+            INSERT OR IGNORE INTO funds (fund_code, fund_name, created_at)
+            SELECT fund_code, MIN(fund_name), MIN(inserted_at)
             FROM fund_nav_data
-            WHERE 产品代码 IS NOT NULL
-            GROUP BY 产品代码
-            ORDER BY MIN(插入时间)
+            WHERE fund_code IS NOT NULL
+            GROUP BY fund_code
+            ORDER BY MIN(inserted_at)
         ''')
         conn.commit()
 
     # 迁移：回填 fund_nav_data 中 fund_id 为 NULL 的已有记录
     cursor.execute('''
         UPDATE fund_nav_data
-        SET fund_id = (SELECT fund_id FROM funds WHERE funds.产品代码 = fund_nav_data.产品代码)
-        WHERE fund_id IS NULL AND 产品代码 IS NOT NULL
+        SET fund_id = (SELECT fund_id FROM funds WHERE funds.fund_code = fund_nav_data.fund_code)
+        WHERE fund_id IS NULL AND fund_code IS NOT NULL
     ''')
     conn.commit()
 
     # 创建索引以提高查询性能
     cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_product_code
-        ON fund_nav_data(产品代码)
+        ON fund_nav_data(fund_code)
     ''')
 
     cursor.execute('''
         CREATE INDEX IF NOT EXISTS idx_nav_date
-        ON fund_nav_data(净值日期)
+        ON fund_nav_data(nav_date)
     ''')
 
     cursor.execute('''
@@ -189,14 +189,14 @@ def save_sync_state(conn, last_uid, uidvalidity):
 
 
 def get_or_create_fund_id(conn, product_code, product_name=None):
-    """获取或创建基金的 fund_id（基于产品代码全局唯一，按首次录入时间自增）"""
+    """获取或创建基金的 fund_id（基于 fund_code 全局唯一，按首次录入时间自增）"""
     cursor = conn.cursor()
-    cursor.execute('SELECT fund_id FROM funds WHERE 产品代码 = ?', (product_code,))
+    cursor.execute('SELECT fund_id FROM funds WHERE fund_code = ?', (product_code,))
     row = cursor.fetchone()
     if row:
         return row[0]
     cursor.execute(
-        'INSERT INTO funds (产品代码, 产品名称) VALUES (?, ?)',
+        'INSERT INTO funds (fund_code, fund_name) VALUES (?, ?)',
         (product_code, product_name)
     )
     conn.commit()
@@ -422,8 +422,8 @@ def insert_data_to_db(conn, df, failed_inserts, source_id=None):
 
             cursor.execute('''
                 INSERT OR IGNORE INTO fund_nav_data
-                (fund_id, 产品名称, 产品代码, 净值日期, 单位净值, 累计单位净值, source_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                (fund_id, fund_name, fund_code, nav_date, unit_nav, accum_nav, source_id, data_source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 fund_id,
                 row.get('产品名称'),
@@ -431,7 +431,8 @@ def insert_data_to_db(conn, df, failed_inserts, source_id=None):
                 row.get('净值日期'),
                 row.get('单位净值'),
                 row.get('累计单位净值'),
-                source_id
+                source_id,
+                'email'
             ))
 
             if cursor.rowcount > 0:
@@ -466,10 +467,10 @@ def compute_adjusted_nav(conn, product_code):
     """
     rows = conn.execute(
         """
-        SELECT id, 净值日期, 单位净值, 累计单位净值, adjusted_nav
+        SELECT id, nav_date, unit_nav, accum_nav, adjusted_nav
         FROM fund_nav_data
-        WHERE 产品代码 = ? AND 净值日期 IS NOT NULL AND 单位净值 IS NOT NULL AND 单位净值 > 0
-        ORDER BY 净值日期 ASC
+        WHERE fund_code = ? AND nav_date IS NOT NULL AND unit_nav IS NOT NULL AND unit_nav > 0
+        ORDER BY nav_date ASC
         """,
         (product_code,)
     ).fetchall()
@@ -648,8 +649,8 @@ def query_and_display_data(conn):
     cursor = conn.cursor()
 
     cursor.execute('''
-        SELECT f.fund_id, f.产品代码, f.产品名称,
-               COUNT(n.id), MIN(n.净值日期), MAX(n.净值日期)
+        SELECT f.fund_id, f.fund_code, f.fund_name,
+               COUNT(n.id), MIN(n.nav_date), MAX(n.nav_date)
         FROM funds f
         LEFT JOIN fund_nav_data n ON f.fund_id = n.fund_id
         GROUP BY f.fund_id
@@ -978,7 +979,7 @@ def connect_and_fetch_email(email_user, email_pwd, db_path):
         # 增量计算复权累计净值（只处理有 NULL 行的基金）
         if total_data_inserted > 0:
             null_funds = conn.execute(
-                "SELECT DISTINCT 产品代码 FROM fund_nav_data WHERE adjusted_nav IS NULL AND 产品代码 IS NOT NULL"
+                "SELECT DISTINCT fund_code FROM fund_nav_data WHERE adjusted_nav IS NULL AND fund_code IS NOT NULL"
             ).fetchall()
             if null_funds:
                 print(f"\n计算复权累计净值（共 {len(null_funds)} 个基金）...")

@@ -7,6 +7,15 @@ const PERIOD_OPTIONS = [
   { label: '成立来', days: 0 },
 ]
 
+function normalizeDate(dateStr) {
+  if (typeof dateStr !== 'string') return null
+  if (/^\d{8}$/.test(dateStr)) {
+    return `${dateStr.slice(0, 4)}-${dateStr.slice(4, 6)}-${dateStr.slice(6, 8)}`
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return dateStr
+  return null
+}
+
 function fmt(val, format) {
   if (val == null) return '—'
   if (format === 'pct') return `${val >= 0 ? '+' : ''}${val.toFixed(2)}%`
@@ -76,12 +85,24 @@ export default function MetricsTab({
   // Build period-filtered items from navItems based on selected period
   const periodItems = useMemo(() => {
     if (!navItems || navItems.length === 0) return []
-    if (period === 0) return navItems
-    const latest = navItems[navItems.length - 1].nav_date
-    const d = new Date(latest)
+
+    const normalized = navItems
+      .map(item => {
+        const navDate = normalizeDate(item.nav_date)
+        return navDate ? { ...item, nav_date: navDate } : null
+      })
+      .filter(Boolean)
+
+    if (normalized.length === 0) return []
+    if (period === 0) return normalized
+
+    const latest = normalized[normalized.length - 1].nav_date
+    const d = new Date(`${latest}T00:00:00`)
+    if (Number.isNaN(d.getTime())) return normalized
+
     d.setDate(d.getDate() - period)
     const from = d.toISOString().slice(0, 10)
-    return navItems.filter(i => i.nav_date >= from)
+    return normalized.filter(i => i.nav_date >= from)
   }, [navItems, period])
 
   const metricsNavType = navType === 'return' ? 'unit' : navType
@@ -153,7 +174,7 @@ export default function MetricsTab({
           <MetricRow label="年化收益"     fundVal={fm.annualizedReturn}  benchVal={bm?.annualizedReturn}  format="pct" />
           <MetricRow label="Alpha"        fundVal={rel?.alpha}           benchVal={null}                  format="pct" />
           <MetricRow label="月胜率"       fundVal={fm.monthlyWinRate}    benchVal={bm?.monthlyWinRate}    format="pct" />
-          <MetricRow label="Beta (进攻)"  fundVal={rel?.beta}            benchVal={null}                  format="ratio" />
+          <MetricRow label="Beta (进攻)"  fundVal={rel?.betaOffensive}   benchVal={null}                  format="ratio" />
         </MetricSection>
 
         {/* 投资性价比 */}
@@ -170,7 +191,7 @@ export default function MetricsTab({
           <MetricRow label="回撤回补期"   fundVal={fm.maxDDRecoveryDays} benchVal={bm?.maxDDRecoveryDays} format="days"  />
           <MetricRow label="年化波动率"   fundVal={fm.annualizedVol}     benchVal={bm?.annualizedVol}     format="pct"   invertGood />
           <MetricRow label="下行风险"     fundVal={fm.downsideRisk}      benchVal={bm?.downsideRisk}      format="pct"   invertGood />
-          <MetricRow label="Beta (防守)"  fundVal={rel?.beta}            benchVal={null}                  format="ratio" />
+          <MetricRow label="Beta (防守)"  fundVal={rel?.betaDefensive}   benchVal={null}                  format="ratio" />
           <MetricRow label="跟踪误差"     fundVal={rel?.trackingError}   benchVal={null}                  format="pct"   invertGood />
         </MetricSection>
 
@@ -192,7 +213,7 @@ export default function MetricsTab({
       )}
 
       <p className="text-xs text-gray-400 text-center">
-        区间 {fm.days} 天 · 无风险利率 2.5% · 同类数据暂未接入
+        区间 {fm.days} 天 · 无风险利率 1.75% · 同类数据暂未接入
       </p>
     </div>
   )

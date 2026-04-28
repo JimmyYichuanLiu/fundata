@@ -8,6 +8,9 @@ export const METRIC_GROUPS = [
       { key: 'periodReturn',     label: '区间收益',   format: 'pct'   },
       { key: 'annualizedReturn', label: '年化收益',   format: 'pct'   },
       { key: 'monthlyWinRate',   label: '月胜率',     format: 'pct'   },
+      { key: 'beta',             label: 'Beta',       format: 'ratio' },
+      { key: 'betaOffensive',    label: 'Beta(进攻)', format: 'ratio' },
+      { key: 'betaDefensive',    label: 'Beta(防守)', format: 'ratio' },
     ],
   },
   {
@@ -36,9 +39,10 @@ export const EXCESS_METRIC_GROUPS = [
     key: 'excess_return',
     label: '超额收益指标',
     metrics: [
-      { key: 'periodExcess',     label: '超额区间收益', format: 'pct'   },
-      { key: 'annualizedExcess', label: '超额年化收益', format: 'pct'   },
-      { key: 'excessSharpe',     label: '超额夏普',     format: 'ratio' },
+      { key: 'periodExcess',            label: '超额区间收益', format: 'pct'   },
+      { key: 'annualizedExcess',        label: '超额年化收益', format: 'pct'   },
+      { key: 'annualizedExcessReturn',  label: '年化超额收益', format: 'pct'   },
+      { key: 'excessSharpe',            label: '超额夏普',     format: 'ratio' },
       { key: 'alpha',            label: 'Alpha',        format: 'pct'   },
     ],
   },
