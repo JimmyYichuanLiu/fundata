@@ -168,23 +168,11 @@ def _migrate_fund_nav_data_table(conn: sqlite3.Connection) -> None:
 
 
 def migrate_fund_data_db(db_path: str) -> None:
-    """
-    Migrate fund_data.db in-place.
-    Wraps both table migrations in a single transaction; rolls back on error.
-    """
-    conn = sqlite3.connect(db_path)
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("BEGIN")
-        _migrate_funds_table(conn)
-        _migrate_fund_nav_data_table(conn)
-        conn.execute("COMMIT")
-        logger.info("fund_data.db migration complete.")
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
-    finally:
-        conn.close()
+    """Use the shared backed-up migration used by ingestion and API startup."""
+    from fund_store import initialize_database
+    conn = initialize_database(db_path)
+    conn.close()
+    logger.info("fund_data.db shared migration complete.")
 
 
 # ---------------------------------------------------------------------------

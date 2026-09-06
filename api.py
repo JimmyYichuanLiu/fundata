@@ -9,8 +9,11 @@ FastAPI application exposing CRUD + search endpoints for fund_data.db
 # Section 1: Imports
 # =============================================================================
 import json
+import hashlib
 import logging
+import math
 import os
+from pathlib import Path
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -25,6 +28,10 @@ from fastapi import BackgroundTasks, Depends, FastAPI, Query, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse
+from admin_auth import allowed_origins, configure_auth, initialize_auth, readonly
+from fund_store import initialize_database, normalize_nav_date, recalculate_adj_nav
+from sync_service import run_email_sync, get_sync_summary, SyncError
 from get_163_email import connect_and_fetch_email
 from pydantic import BaseModel, field_validator
 
@@ -33,7 +40,7 @@ from pydantic import BaseModel, field_validator
 # =============================================================================
 load_dotenv()
 
-DB_PATH: str = os.getenv("DB_PATH", "fund_data.db")
+DB_PATH: str = str(Path(os.getenv("DB_PATH", str(Path(__file__).parent / "fund_data.db"))).resolve())
 API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
 API_PORT: int = int(os.getenv("API_PORT", "8000"))
 _INTRADAY_MODE: bool = os.getenv("MARKET_INTRADAY_MODE", "0").strip() == "1"
@@ -118,7 +125,10 @@ def _init_db_schema():
     """Ensure the post-migration English-column schema exists.
     Creates missing tables/indexes; does NOT rename columns (that is
     db_schema_migrate.py's job).  Safe to call on an already-migrated DB."""
+    migrated = initialize_database(DB_PATH)
+    migrated.close()
     with _get_raw_conn() as conn:
+        initialize_auth(conn)
         # funds — English columns (post-migration schema)
         conn.execute('''
             CREATE TABLE IF NOT EXISTS funds (
@@ -189,7 +199,10 @@ _scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _init_db_schema()
-    _scheduler.add_job(_run_sync, "cron", hour="12,18", minute=0)
+    if os.getenv('FUNDATA_SCHEDULER_ENABLED', '1') == '0':
+        yield
+        return
+    _scheduler.add_job(_run_sync, "cron", hour="12,18", minute=0, id='email_sync', replace_existing=True)
     if _MARKET_ENABLED:
         # Daily snapshots: midday (11:30) and post-market close (15:15)
         _scheduler.add_job(_run_market_sync, "cron", hour=11, minute=30)
@@ -226,11 +239,12 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+configure_auth(app, lambda: DB_PATH)
 
 # 挂载原油路由（独立模块）
 if _CRUDE_ENABLED:
@@ -261,7 +275,10 @@ class NavRecord(BaseModel):
     accumulated_nav: Optional[float]
     adjusted_nav: Optional[float]
     insert_time: Optional[str]
-    source_id: Optional[int]           # NULL = manually entered
+    source_id: Optional[int]
+    data_source: Optional[str] = None
+    adj_nav: Optional[float] = None
+    adj_nav_reason: Optional[str] = None
 
 
 class FundSummary(BaseModel):
@@ -280,6 +297,8 @@ class FundDetail(FundSummary):
     benchmark_index: Optional[str] = None
     strategy_l1: Optional[str] = None
     strategy_l2: Optional[str] = None
+    sources: List[str] = []
+    latest_nav_date: Optional[str] = None
 
 
 class StrategyUpdateRequest(BaseModel):
@@ -325,12 +344,16 @@ class NavCreateRequest(BaseModel):
         import re
         if not re.match(r"^\d{4}-\d{2}-\d{2}$", v):
             raise ValueError("nav_date must be in YYYY-MM-DD format")
+        if normalize_nav_date(v) is None:
+            raise ValueError('nav_date must be a real calendar date')
         return v
 
-    @field_validator("unit_nav")
+    @field_validator("unit_nav", "accumulated_nav")
     @classmethod
     def validate_unit_nav(cls, v: float) -> float:
-        if v <= 0:
+        if v is None:
+            return v
+        if not math.isfinite(v) or v <= 0:
             raise ValueError("unit_nav must be greater than 0")
         return v
 
@@ -349,14 +372,16 @@ class NavUpdateRequest(BaseModel):
         import re
         if not re.match(r"^\d{4}-\d{2}-\d{2}$", v):
             raise ValueError("nav_date must be in YYYY-MM-DD format")
+        if normalize_nav_date(v) is None:
+            raise ValueError('nav_date must be a real calendar date')
         return v
 
-    @field_validator("unit_nav", mode="before")
+    @field_validator("unit_nav", "accumulated_nav")
     @classmethod
     def validate_unit_nav(cls, v: Optional[float]) -> Optional[float]:
         if v is None:
             return v
-        if v <= 0:
+        if not math.isfinite(v) or v <= 0:
             raise ValueError("unit_nav must be greater than 0")
         return v
 
@@ -365,6 +390,7 @@ class NavDataPoint(BaseModel):
     date: str
     nav: float
     accumulated_nav: Optional[float]
+    adj_nav: Optional[float] = None
 
 
 class FundNavSeries(BaseModel):
@@ -522,6 +548,9 @@ def nav_row_to_model(row) -> NavRecord:
         adjusted_nav=adjusted_nav,
         insert_time=row["录入时间"],
         source_id=row["source_id"],
+        data_source=row['data_source'] if 'data_source' in row.keys() else None,
+        adj_nav=adjusted_nav,
+        adj_nav_reason=row['adj_nav_reason'] if 'adj_nav_reason' in row.keys() else None,
     )
 
 
@@ -536,9 +565,14 @@ def quality_filter_sql(apply: bool) -> str:
 
 def _get_sync_status() -> dict:
     with _get_raw_conn() as conn:
-        keys = ["sync_last_time", "sync_last_status", "sync_last_added", "sync_last_error"]
-        row = {k: conn.execute("SELECT value FROM sync_state WHERE key=?", (k,)).fetchone() for k in keys}
-        return {k: (row[k][0] if row[k] else None) for k in keys}
+        result = get_sync_summary(conn)
+    # The public summary never carries subjects, senders, or internal error text.
+    result.pop('last_error', None)
+    result.update(sync_last_time=result['last_attempt_time'], sync_last_status=result['last_status'],
+                  sync_last_added=result['last_added'], sync_last_error=None)
+    job = _scheduler.get_job('email_sync') if _scheduler.running else None
+    result['next_scheduled_at'] = job.next_run_time.isoformat() if job and job.next_run_time else None
+    return result
 
 
 def _set_sync_key(key: str, value: str):
@@ -549,21 +583,15 @@ def _set_sync_key(key: str, value: str):
 _sync_lock = threading.Lock()
 
 
-def _run_sync():
+def _run_sync(trigger='scheduled', retry_failure_id=None):
     if not _sync_lock.acquire(blocking=False):
         return  # already running, skip
     try:
-        _set_sync_key("sync_last_time", datetime.now().isoformat())
-        _set_sync_key("sync_last_status", "running")
-        _set_sync_key("sync_last_error", "")
         email_user = os.getenv("EMAIL_USER", "")
         email_pwd  = os.getenv("EMAIL_PASSWORD", "")
-        connect_and_fetch_email(email_user, email_pwd, DB_PATH)
-        _set_sync_key("sync_last_status", "success")
-        _set_sync_key("sync_last_added", "")
-    except Exception as e:
-        _set_sync_key("sync_last_status", "error")
-        _set_sync_key("sync_last_error", str(e))
+        return run_email_sync(email_user, email_pwd, DB_PATH, trigger=trigger, retry_failure_id=retry_failure_id)
+    except SyncError as e:
+        logger.error('Email sync failed: %s', e)
     finally:
         _sync_lock.release()
 
@@ -621,7 +649,7 @@ def _run_realtime_sync():
 
 def _compute_issues(conn, fund_id: int) -> dict:
     rows = conn.execute(
-        """SELECT nav_date, unit_nav FROM fund_nav_data
+        """SELECT nav_date, unit_nav FROM valid_fund_nav
            WHERE fund_id=? AND nav_date IS NOT NULL AND LENGTH(nav_date) = 10
            ORDER BY nav_date ASC""",
         (fund_id,)
@@ -683,18 +711,14 @@ def list_failures(
     offset: int = Query(0, ge=0),
     conn: sqlite3.Connection = Depends(get_db),
 ):
-    try:
-        total = conn.execute("SELECT COUNT(*) FROM extraction_failures").fetchone()[0]
-        rows = conn.execute(
-            """SELECT id, 失败时间, 邮件主题, 邮件发件人, 邮件日期, 附件文件名, sheet名称, 失败原因
-               FROM extraction_failures ORDER BY 失败时间 DESC LIMIT ? OFFSET ?""",
-            (limit, offset),
-        ).fetchall()
-        items = [dict(r) for r in rows]
-    except Exception:
-        # Table may not exist in older DBs
-        total = 0
-        items = []
+    total = conn.execute("SELECT COUNT(*) FROM extraction_failures").fetchone()[0]
+    rows = conn.execute(
+        "SELECT * FROM extraction_failures ORDER BY id DESC LIMIT ? OFFSET ?", (limit, offset)
+    ).fetchall()
+    items = [dict(r) for r in rows]
+    for item in items:
+        item['retryable'] = bool(item.get('mailbox_uid') and item.get('uidvalidity') and item.get('status') != 'resolved')
+        item['retry_reason'] = None if item['retryable'] else ('已恢复' if item.get('status') == 'resolved' else '历史记录缺少邮箱 UID，无法自动定位；需重新导入原始邮件')
     return {"total": total, "items": items}
 
 
@@ -703,15 +727,15 @@ def list_failures(
 @app.get("/api/stats", tags=["system"])
 def get_stats(conn: sqlite3.Connection = Depends(get_db)):
     row = conn.execute(
-        "SELECT COUNT(*) AS total_records FROM fund_nav_data"
+        "SELECT COUNT(*) AS total_records FROM valid_fund_nav"
     ).fetchone()
     total_records: int = row["total_records"]
 
-    row2 = conn.execute("SELECT COUNT(*) AS total_funds FROM funds").fetchone()
+    row2 = conn.execute("SELECT COUNT(DISTINCT fund_id) AS total_funds FROM valid_fund_nav").fetchone()
     total_funds: int = row2["total_funds"]
 
     row3 = conn.execute(
-        "SELECT COUNT(*) AS manual_records FROM fund_nav_data WHERE source_id IS NULL"
+        "SELECT COUNT(*) AS manual_records FROM valid_fund_nav WHERE data_source = 'manual'"
     ).fetchone()
     manual_records: int = row3["manual_records"]
 
@@ -719,6 +743,9 @@ def get_stats(conn: sqlite3.Connection = Depends(get_db)):
         "total_records": total_records,
         "total_funds": total_funds,
         "manual_records": manual_records,
+        "valid_funds": total_funds,
+        "latest_nav_date": conn.execute('SELECT MAX(nav_date) FROM valid_fund_nav').fetchone()[0],
+        "quarantined_records": conn.execute("SELECT COUNT(*) FROM fund_nav_data WHERE quality_status != 'valid'").fetchone()[0],
     }
 
 
@@ -729,10 +756,15 @@ def list_funds(
     strategy_l1: Optional[str] = Query(None),
     strategy_l2: Optional[str] = Query(None),
     apply_filter: bool = Query(True, description="Exclude unit_nav > 5 from record_count"),
+    source: str = Query('all', pattern='^(all|email|zx_excel|manual)$'),
     conn: sqlite3.Connection = Depends(get_db),
 ):
     conditions = []
     params: list = []
+    if source != 'all':
+        conditions.append('EXISTS (SELECT 1 FROM valid_fund_nav sn WHERE sn.fund_id=f.fund_id AND sn.data_source=?)')
+        params.append(source)
+    conditions.append('EXISTS (SELECT 1 FROM valid_fund_nav vn WHERE vn.fund_id=f.fund_id)')
     if strategy_l1 is not None:
         conditions.append("f.strategy_l1 = ?")
         params.append(strategy_l1)
@@ -757,7 +789,7 @@ def list_funds(
             MAX(n.nav_date)                            AS latest_date,
             COUNT(CASE WHEN n.unit_nav > 5 THEN 1 END) AS anomalous_count
         FROM funds f
-        LEFT JOIN fund_nav_data n ON f.fund_id = n.fund_id {nav_filter}
+        LEFT JOIN valid_fund_nav n ON f.fund_id = n.fund_id {nav_filter}
         {where_clause}
         GROUP BY f.fund_id
         ORDER BY f.fund_id
@@ -770,7 +802,7 @@ def list_funds(
         latest_nav: Optional[float] = None
         if r["latest_date"]:
             nav_row = conn.execute(
-                "SELECT unit_nav FROM fund_nav_data WHERE fund_id = ? AND nav_date = ? LIMIT 1",
+                "SELECT unit_nav FROM valid_fund_nav WHERE fund_id = ? AND nav_date = ? LIMIT 1",
                 (r["fund_id"], r["latest_date"]),
             ).fetchone()
             if nav_row:
@@ -791,6 +823,8 @@ def list_funds(
             anomalous_count=r["anomalous_count"] or 0,
             strategy_l1=r["strategy_l1"],
             strategy_l2=r["strategy_l2"],
+            sources=[s[0] for s in conn.execute('SELECT DISTINCT data_source FROM valid_fund_nav WHERE fund_id=? AND data_source IS NOT NULL ORDER BY data_source', (r['fund_id'],))],
+            latest_nav_date=r['latest_date'],
         )
         items.append(fd.model_dump())
 
@@ -866,7 +900,7 @@ def get_fund_returns(
     rows = conn.execute(
         """
         SELECT n.fund_id, n.nav_date, n.unit_nav
-        FROM fund_nav_data n
+        FROM valid_fund_nav n
         WHERE n.nav_date >= ?
           AND n.unit_nav IS NOT NULL
           AND n.unit_nav > 0
@@ -1048,7 +1082,7 @@ def get_fund_metrics_summary(
     rows = conn.execute(
         """
         SELECT n.fund_id, n.nav_date, n.unit_nav
-        FROM fund_nav_data n
+        FROM valid_fund_nav n
         WHERE n.nav_date >= ?
           AND n.unit_nav IS NOT NULL
           AND n.unit_nav > 0
@@ -1121,7 +1155,7 @@ def get_fund(fund_id: int, conn: sqlite3.Connection = Depends(get_db)):
             MIN(n.nav_date) AS earliest_date,
             MAX(n.nav_date) AS latest_date
         FROM funds f
-        LEFT JOIN fund_nav_data n ON f.fund_id = n.fund_id
+        LEFT JOIN valid_fund_nav n ON f.fund_id = n.fund_id
         WHERE f.fund_id = ?
         GROUP BY f.fund_id
         """,
@@ -1134,7 +1168,7 @@ def get_fund(fund_id: int, conn: sqlite3.Connection = Depends(get_db)):
     latest_nav: Optional[float] = None
     if row["latest_date"]:
         nav_row = conn.execute(
-            "SELECT unit_nav FROM fund_nav_data WHERE fund_id = ? AND nav_date = ? LIMIT 1",
+            "SELECT unit_nav FROM valid_fund_nav WHERE fund_id = ? AND nav_date = ? LIMIT 1",
             (fund_id, row["latest_date"]),
         ).fetchone()
         if nav_row:
@@ -1155,6 +1189,8 @@ def get_fund(fund_id: int, conn: sqlite3.Connection = Depends(get_db)):
         benchmark_index=row["benchmark_index"],
         strategy_l1=row["strategy_l1"],
         strategy_l2=row["strategy_l2"],
+        sources=[s[0] for s in conn.execute('SELECT DISTINCT data_source FROM valid_fund_nav WHERE fund_id=? AND data_source IS NOT NULL ORDER BY data_source', (fund_id,))],
+        latest_nav_date=row['latest_date'],
     )
 
 
@@ -1196,14 +1232,14 @@ def get_fund_nav(
     where_clause = " AND ".join(conditions)
 
     count_row = conn.execute(
-        f"SELECT COUNT(*) AS cnt FROM fund_nav_data WHERE {where_clause}", params
+        f"SELECT COUNT(*) AS cnt FROM valid_fund_nav WHERE {where_clause}", params
     ).fetchone()
     total: int = count_row["cnt"]
 
     rows = conn.execute(
         f"""
-        SELECT id, fund_id, fund_name, fund_code, nav_date, unit_nav, accum_nav, adj_nav, "录入时间", source_id
-        FROM fund_nav_data
+        SELECT *
+        FROM valid_fund_nav
         WHERE {where_clause}
         ORDER BY nav_date ASC
         LIMIT ? OFFSET ?
@@ -1243,11 +1279,12 @@ def create_nav(body: NavCreateRequest, conn: sqlite3.Connection = Depends(get_db
         )
 
     new_id = cursor.lastrowid
+    recalculate_adj_nav(conn, body.product_code)
     conn.commit()
 
     row = conn.execute(
-        'SELECT id, fund_id, fund_name, fund_code, nav_date, unit_nav, accum_nav, adj_nav, "录入时间", source_id '
-        "FROM fund_nav_data WHERE id = ?",
+        'SELECT * '
+        "FROM valid_fund_nav WHERE id = ?",
         (new_id,),
     ).fetchone()
     return nav_row_to_model(row)
@@ -1258,8 +1295,8 @@ def create_nav(body: NavCreateRequest, conn: sqlite3.Connection = Depends(get_db
 @app.get("/api/nav/{nav_id}", response_model=NavRecord, tags=["nav"])
 def get_nav(nav_id: int, conn: sqlite3.Connection = Depends(get_db)):
     row = conn.execute(
-        'SELECT id, fund_id, fund_name, fund_code, nav_date, unit_nav, accum_nav, adj_nav, "录入时间", source_id '
-        "FROM fund_nav_data WHERE id = ?",
+        'SELECT * '
+        "FROM valid_fund_nav WHERE id = ?",
         (nav_id,),
     ).fetchone()
     if not row:
@@ -1272,8 +1309,8 @@ def get_nav(nav_id: int, conn: sqlite3.Connection = Depends(get_db)):
 @app.put("/api/nav/{nav_id}", response_model=NavRecord, tags=["nav"])
 def update_nav(nav_id: int, body: NavUpdateRequest, conn: sqlite3.Connection = Depends(get_db)):
     existing = conn.execute(
-        'SELECT id, fund_id, fund_name, fund_code, nav_date, unit_nav, accum_nav, adj_nav, "录入时间", source_id '
-        "FROM fund_nav_data WHERE id = ?",
+        'SELECT * '
+        "FROM valid_fund_nav WHERE id = ?",
         (nav_id,),
     ).fetchone()
     if not existing:
@@ -1289,7 +1326,7 @@ def update_nav(nav_id: int, body: NavUpdateRequest, conn: sqlite3.Connection = D
     # Check for uniqueness conflict when date changes
     if body.nav_date is not None and new_nav_date != existing["nav_date"]:
         conflict = conn.execute(
-            "SELECT id FROM fund_nav_data WHERE fund_code = ? AND nav_date = ? AND id != ?",
+            "SELECT id FROM valid_fund_nav WHERE fund_code = ? AND nav_date = ? AND id != ?",
             (new_fund_code, new_nav_date, nav_id),
         ).fetchone()
         if conflict:
@@ -1323,11 +1360,12 @@ def update_nav(nav_id: int, body: NavUpdateRequest, conn: sqlite3.Connection = D
         f"UPDATE fund_nav_data SET {', '.join(set_clauses)} WHERE id = ?",
         params,
     )
+    recalculate_adj_nav(conn, new_fund_code)
     conn.commit()
 
     updated = conn.execute(
-        'SELECT id, fund_id, fund_name, fund_code, nav_date, unit_nav, accum_nav, adj_nav, "录入时间", source_id '
-        "FROM fund_nav_data WHERE id = ?",
+        'SELECT * '
+        "FROM valid_fund_nav WHERE id = ?",
         (nav_id,),
     ).fetchone()
     return nav_row_to_model(updated)
@@ -1338,12 +1376,13 @@ def update_nav(nav_id: int, body: NavUpdateRequest, conn: sqlite3.Connection = D
 @app.delete("/api/nav/{nav_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["nav"])
 def delete_nav(nav_id: int, conn: sqlite3.Connection = Depends(get_db)):
     existing = conn.execute(
-        "SELECT id FROM fund_nav_data WHERE id = ?", (nav_id,)
+        "SELECT id, fund_code FROM valid_fund_nav WHERE id = ?", (nav_id,)
     ).fetchone()
     if not existing:
         raise NavAPIError(404, f"NAV record {nav_id} not found", "NOT_FOUND")
 
     conn.execute("DELETE FROM fund_nav_data WHERE id = ?", (nav_id,))
+    recalculate_adj_nav(conn, existing['fund_code'])
     conn.commit()
     # 204 No Content — FastAPI returns empty body automatically
 
@@ -1359,8 +1398,8 @@ def compare_funds(
     conn: sqlite3.Connection = Depends(get_db),
 ):
     unique_ids = list(dict.fromkeys(fund_ids))  # deduplicate, preserve order
-    if len(unique_ids) > 20:
-        raise NavAPIError(400, "At most 20 fund_ids are allowed per compare request", "BAD_REQUEST")
+    if len(unique_ids) > 8:
+        raise NavAPIError(400, "At most 8 fund_ids are allowed per compare request", "BAD_REQUEST")
 
     if date_from and date_to:
         if date_from > date_to:
@@ -1389,8 +1428,8 @@ def compare_funds(
         where_clause = " AND ".join(conditions)
         rows = conn.execute(
             f"""
-            SELECT nav_date, unit_nav, accum_nav
-            FROM fund_nav_data
+            SELECT nav_date, unit_nav, accum_nav, adj_nav
+            FROM valid_fund_nav
             WHERE {where_clause}
             ORDER BY nav_date ASC
             """,
@@ -1402,6 +1441,7 @@ def compare_funds(
                 date=r["nav_date"],
                 nav=r["unit_nav"],
                 accumulated_nav=r["accum_nav"],
+                adj_nav=r['adj_nav'],
             )
             for r in rows
         ]
@@ -1435,8 +1475,45 @@ def get_sync_status():
 
 @app.post("/api/sync/trigger", tags=["system"])
 def trigger_sync(background_tasks: BackgroundTasks):
-    background_tasks.add_task(_run_sync)
-    return {"message": "sync started"}
+    if _get_sync_status()['is_running'] or _sync_lock.locked():
+        raise NavAPIError(409, '同步正在运行', 'SYNC_RUNNING')
+    background_tasks.add_task(_run_sync, 'manual')
+    return {"message": "sync queued", "status": "queued"}
+
+
+@app.get('/api/sync/history', tags=['system'])
+def sync_history(limit: int = Query(50, ge=1, le=200), conn: sqlite3.Connection = Depends(get_db)):
+    return {'items': [dict(r) for r in conn.execute('SELECT * FROM sync_runs ORDER BY id DESC LIMIT ?', (limit,))]}
+
+
+@app.post('/api/failures/{failure_id}/retry', tags=['system'])
+def retry_failure(failure_id: int, background_tasks: BackgroundTasks, conn: sqlite3.Connection = Depends(get_db)):
+    row = conn.execute('SELECT * FROM extraction_failures WHERE id=?', (failure_id,)).fetchone()
+    if not row:
+        raise NavAPIError(404, '失败记录不存在', 'NOT_FOUND')
+    if not row['mailbox_uid'] or not row['uidvalidity']:
+        raise NavAPIError(409, '历史记录缺少邮箱 UID，无法自动定位原邮件', 'RETRY_UNAVAILABLE')
+    if row['status'] == 'resolved':
+        raise NavAPIError(409, '此记录已恢复', 'ALREADY_RESOLVED')
+    if _get_sync_status()['is_running'] or _sync_lock.locked():
+        raise NavAPIError(409, '同步正在运行', 'SYNC_RUNNING')
+    background_tasks.add_task(_run_sync, 'retry', failure_id)
+    return {'status': 'queued', 'failure_id': failure_id}
+
+
+@app.get('/api/export/email.xlsx', tags=['system'])
+def export_email_excel(background_tasks: BackgroundTasks):
+    from organize_fund_data import organize_fund_data
+    from uuid import uuid4
+    output = Path(__file__).parent / 'exports' / f'email-nav-{uuid4().hex}.xlsx'
+    output.parent.mkdir(exist_ok=True)
+    try:
+        organize_fund_data(DB_PATH, str(output), source='email')
+    except ValueError as exc:
+        raise NavAPIError(409, str(exc), 'NO_EXPORT_DATA') from exc
+    background_tasks.add_task(output.unlink, missing_ok=True)
+    return FileResponse(output, filename='fund_email_nav.xlsx', background=background_tasks,
+                        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
 
 # --- Market data helpers -----------------------------------------------------
@@ -1921,7 +1998,7 @@ def remove_tag(fund_id: int, tag_id: int, conn: sqlite3.Connection = Depends(get
 
 @app.get("/api/market/sync/status", tags=["market"])
 def get_market_sync_status():
-    keys = ["market_last_status", "market_last_error", "market_index_last_date", "market_futures_last_date"]
+    keys = ["market_last_status", "market_index_last_date", "market_futures_last_date"]
     with _get_raw_conn() as conn:
         row = {k: conn.execute("SELECT value FROM sync_state WHERE key=?", (k,)).fetchone() for k in keys}
     return {k: (row[k][0] if row[k] else None) for k in keys}
@@ -1953,6 +2030,23 @@ class PortfolioCreateIn(BaseModel):
 
 class PortfolioUpdateIn(PortfolioCreateIn):
     pass
+
+
+def _validate_portfolio(body):
+    if not body.portfolio_name.strip() or len(body.portfolio_name) > 200:
+        raise NavAPIError(422, '组合名称不能为空且不能超过 200 字', 'BAD_REQUEST')
+    if body.build_method not in ('BATCH_INCLUDE', 'UNIFIED_START'):
+        raise NavAPIError(422, '无效构建方式', 'BAD_REQUEST')
+    if not 2 <= len(body.constituents) <= 100 or len({c.fund_id for c in body.constituents}) != len(body.constituents):
+        raise NavAPIError(422, '组合需要 2–100 只不重复基金', 'BAD_REQUEST')
+    for c in body.constituents:
+        if normalize_nav_date(c.effective_date) != c.effective_date:
+            raise NavAPIError(422, '生效日期必须是有效 YYYY-MM-DD 日期', 'BAD_REQUEST')
+        value = c.target_weight if body.build_method == 'UNIFIED_START' else c.target_amount
+        if value is None or not math.isfinite(value) or value <= 0:
+            raise NavAPIError(422, '权重或金额必须为有限正数', 'BAD_REQUEST')
+    if body.build_method == 'UNIFIED_START' and not math.isclose(sum(c.target_weight for c in body.constituents), 1, abs_tol=1e-6):
+        raise NavAPIError(422, '组合权重合计必须等于 100%', 'BAD_REQUEST')
 
 
 def _ensure_portfolio_tables(conn: sqlite3.Connection) -> None:
@@ -1995,6 +2089,10 @@ def _ensure_portfolio_tables(conn: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             UNIQUE(portfolio_id, nav_date, calc_version)
         );
+        CREATE TABLE IF NOT EXISTS portfolio_calculation_state (
+            portfolio_id INTEGER PRIMARY KEY,
+            input_signature TEXT NOT NULL
+        );
         """
     )
 
@@ -2003,12 +2101,25 @@ def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _portfolio_input_signature(conn, portfolio_id):
+    definition = conn.execute('SELECT build_method FROM portfolio_master WHERE id=?', (portfolio_id,)).fetchone()
+    members = conn.execute('SELECT fund_id,target_amount,target_weight,effective_date FROM portfolio_constituents WHERE portfolio_id=? ORDER BY include_order', (portfolio_id,)).fetchall()
+    digest = hashlib.sha256(json.dumps([list(definition) if definition else None, [list(row) for row in members]]).encode())
+    for member in members:
+        rows = conn.execute('SELECT nav_date,adj_nav FROM valid_fund_nav WHERE fund_id=? ORDER BY nav_date', (member['fund_id'],)).fetchall()
+        digest.update(json.dumps([list(row) for row in rows]).encode())
+    return digest.hexdigest()
+
+
 def _portfolio_series_by_fund(conn: sqlite3.Connection, fund_id: int) -> dict:
+    missing = conn.execute('SELECT COUNT(*) FROM valid_fund_nav WHERE fund_id=? AND adj_nav IS NULL', (fund_id,)).fetchone()[0]
+    if missing:
+        raise NavAPIError(409, f'基金 {fund_id} 缺少完整复权净值，无法计算组合', 'MISSING_ADJUSTED_NAV')
     rows = conn.execute(
         """
-        SELECT nav_date, COALESCE(adj_nav, unit_nav) AS nav
-        FROM fund_nav_data
-        WHERE fund_id = ? AND COALESCE(adj_nav, unit_nav) IS NOT NULL
+        SELECT nav_date, adj_nav AS nav
+        FROM valid_fund_nav
+        WHERE fund_id = ? AND adj_nav IS NOT NULL
         ORDER BY nav_date ASC
         """,
         (fund_id,),
@@ -2027,7 +2138,14 @@ def _calculate_unified_start(constituents: list, nav_maps: dict) -> list:
             raise NavAPIError(400, f"Fund {fid} has no nav on or after effective_date={eff}", "BAD_REQUEST")
         fund_starts.append(first)
     t0 = max(fund_starts)
-    all_dates = sorted({d for m in nav_maps.values() for d in m.keys() if d >= t0})
+    if any(max(values, default='') < t0 for values in nav_maps.values()):
+        raise NavAPIError(409, '基金数据没有公共区间', 'NO_COMMON_RANGE')
+    # Keep full portfolio weights: only dates with an observed NAV for every fund.
+    common_dates = set.intersection(*(set(values) for values in nav_maps.values()))
+    all_dates = sorted(d for d in common_dates if d >= t0)
+    if not all_dates:
+        raise NavAPIError(409, '基金没有共同净值日期，无法按统一起始方式计算', 'NO_COMMON_RANGE')
+    t0 = all_dates[0]
     base = {}
     for c in constituents:
         fid = c["fund_id"]
@@ -2068,13 +2186,18 @@ def _calculate_batch_include(constituents: list, nav_maps: dict) -> list:
             if d in nmap:
                 last_nav[fid] = nmap[d]
 
-        active = [c for c in constituents if c["effective_date"] <= d and d in nav_maps[c["fund_id"]]]
+        # Existing positions remain held across missing observations (legacy LOCF policy).
+        active = [c for c in constituents if c["effective_date"] <= d
+                  and (d in nav_maps[c["fund_id"]] or c['fund_id'] in shares)]
         if not active:
             continue
         # Trigger rebalance if first day, or any new fund joins that wasn't in shares yet
         new_fund_joined = any(c["fund_id"] not in shares for c in active)
         rebalance = (len(items) == 0) or new_fund_joined
         if rebalance:
+            # Revalue existing shares before reallocating; never discard today's return.
+            if shares:
+                total_asset = sum(amount * last_nav[fid] for fid, amount in shares.items())
             total_target = sum(float(c["target_amount"] or 0.0) for c in active)
             if total_target <= 0:
                 raise NavAPIError(400, "target_amount must be > 0 for BATCH_INCLUDE", "BAD_REQUEST")
@@ -2083,7 +2206,7 @@ def _calculate_batch_include(constituents: list, nav_maps: dict) -> list:
                 fid = c["fund_id"]
                 w = float(c["target_amount"] or 0.0) / total_target
                 alloc = total_asset * w
-                new_shares[fid] = alloc / nav_maps[fid][d]
+                new_shares[fid] = alloc / last_nav[fid]
             shares = new_shares
         total_asset = 0.0
         for c in active:
@@ -2109,7 +2232,8 @@ def _calculate_batch_include(constituents: list, nav_maps: dict) -> list:
 def _get_portfolio_constituents(conn: sqlite3.Connection, portfolio_id: int) -> list:
     rows = conn.execute(
         """
-        SELECT portfolio_id, fund_id, fund_code, target_amount, target_weight, effective_date, include_order
+        SELECT portfolio_id, fund_id, fund_code, target_amount, target_weight, effective_date, include_order,
+            (SELECT fund_name FROM funds WHERE funds.fund_id=portfolio_constituents.fund_id) AS fund_name
         FROM portfolio_constituents WHERE portfolio_id=? ORDER BY include_order ASC
         """,
         (portfolio_id,),
@@ -2119,6 +2243,7 @@ def _get_portfolio_constituents(conn: sqlite3.Connection, portfolio_id: int) -> 
 
 @app.post("/api/portfolios", tags=["portfolio"])
 def create_portfolio(body: PortfolioCreateIn, conn: sqlite3.Connection = Depends(get_db)):
+    _validate_portfolio(body)
     _ensure_portfolio_tables(conn)
     now = _now_iso()
     code = datetime.now().strftime("PF%Y%m%d%H%M%S%f")
@@ -2164,6 +2289,7 @@ def get_portfolio(portfolio_id: int, conn: sqlite3.Connection = Depends(get_db))
 
 @app.put("/api/portfolios/{portfolio_id}", tags=["portfolio"])
 def update_portfolio(portfolio_id: int, body: PortfolioUpdateIn, conn: sqlite3.Connection = Depends(get_db)):
+    _validate_portfolio(body)
     _ensure_portfolio_tables(conn)
     row = conn.execute("SELECT id FROM portfolio_master WHERE id=?", (portfolio_id,)).fetchone()
     if not row:
@@ -2207,6 +2333,8 @@ def calculate_portfolio(portfolio_id: int, conn: sqlite3.Connection = Depends(ge
         items = _calculate_unified_start(constituents, nav_maps)
     else:
         items = _calculate_batch_include(constituents, nav_maps)
+    if not items:
+        raise NavAPIError(409, '当前日期范围没有可计算的组合数据', 'NO_PORTFOLIO_DATA')
 
     last_ver = conn.execute("SELECT COALESCE(MAX(calc_version),0) FROM portfolio_nav_cache WHERE portfolio_id=?", (portfolio_id,)).fetchone()[0]
     ver = int(last_ver) + 1
@@ -2219,6 +2347,8 @@ def calculate_portfolio(portfolio_id: int, conn: sqlite3.Connection = Depends(ge
             """,
             (portfolio_id, it["nav_date"], it["portfolio_nav"], it["total_asset"], it["is_rebalance_day"], it["included_fund_count"], ver, now),
         )
+    conn.execute('INSERT INTO portfolio_calculation_state VALUES (?,?) ON CONFLICT(portfolio_id) DO UPDATE SET input_signature=excluded.input_signature',
+                 (portfolio_id, _portfolio_input_signature(conn, portfolio_id)))
     return {"portfolio_id": portfolio_id, "calc_version": ver, "rows": len(items)}
 
 
@@ -2227,7 +2357,10 @@ def get_portfolio_nav(portfolio_id: int, conn: sqlite3.Connection = Depends(get_
     _ensure_portfolio_tables(conn)
     ver = conn.execute("SELECT MAX(calc_version) FROM portfolio_nav_cache WHERE portfolio_id=?", (portfolio_id,)).fetchone()[0]
     if ver is None:
-        return {"items": []}
+        return {"items": [], "stale": False, "reason": "组合尚未计算，请管理员生成净值"}
+    state = conn.execute('SELECT input_signature FROM portfolio_calculation_state WHERE portfolio_id=?', (portfolio_id,)).fetchone()
+    if not state or state[0] != _portfolio_input_signature(conn, portfolio_id):
+        return {'items': [], 'stale': True, 'reason': '基金净值或组合配置已变化，请管理员重新计算；旧结果已保留但不再展示'}
     rows = conn.execute(
         """
         SELECT nav_date, portfolio_nav, total_asset, is_rebalance_day, included_fund_count
@@ -2247,11 +2380,11 @@ def get_portfolio_metrics(portfolio_id: int, conn: sqlite3.Connection = Depends(
     series = [(i["nav_date"], float(i["portfolio_nav"])) for i in items]
     m = _compute_fund_metrics(series)
     return {
-        "annualized_return": 0.0 if m.get("annualized_return") is None else m.get("annualized_return"),
-        "annualized_vol": 0.0 if m.get("annualized_vol") is None else m.get("annualized_vol"),
-        "max_drawdown": 0.0 if m.get("max_drawdown") is None else m.get("max_drawdown"),
-        "sharpe": 0.0 if m.get("sharpe") is None else m.get("sharpe"),
-        "monthly_win_rate": 0.0 if m.get("monthly_win_rate") is None else m.get("monthly_win_rate"),
+        "annualized_return": m.get("annualized_return"),
+        "annualized_vol": m.get("annualized_vol"),
+        "max_drawdown": m.get("max_drawdown"),
+        "sharpe": m.get("sharpe"),
+        "monthly_win_rate": m.get("monthly_win_rate"),
     }
 
 
