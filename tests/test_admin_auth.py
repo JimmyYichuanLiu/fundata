@@ -95,3 +95,26 @@ def test_reject_cross_origin_login_and_short_password(auth_client):
     with sqlite3.connect(path) as conn:
         with pytest.raises(ValueError):
             create_admin(conn, 'unsafe', 'short')
+
+
+def test_local_transport_exception_rejects_proxies_and_public_peers(monkeypatch):
+    from admin_auth import _secure_transport
+    from starlette.requests import Request
+    monkeypatch.setenv('FUNDATA_COOKIE_SECURE','0')
+    def request(peer, headers):
+        return Request({'type':'http','method':'POST','scheme':'http','path':'/api/auth/login',
+                        'query_string':b'','server':('127.0.0.1',8000),'client':(peer,1234),
+                        'headers':[(b'host',b'localhost:8000')] + headers})
+    assert _secure_transport(request('127.0.0.1', []))
+    assert not _secure_transport(request('203.0.113.10', []))
+    assert not _secure_transport(request('127.0.0.1', [(b'x-forwarded-for',b'203.0.113.10')]))
+    monkeypatch.setenv('FUNDATA_COOKIE_SECURE','1')
+    assert not _secure_transport(request('127.0.0.1', []))
+
+
+def test_private_namespace_and_default_readonly(auth_client, monkeypatch):
+    client, _ = auth_client
+    assert client.get('/api/admin').status_code == 401
+    assert client.get('/api/admin/nested').status_code == 401
+    monkeypatch.delenv('FUNDATA_READONLY')
+    assert client.post('/api/nav').status_code == 403
