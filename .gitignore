@@ -28,3 +28,23 @@ web/.claude/
 # Claude project files
 .claude/
 .mcp.json
+
+# Local financial outputs, backups, sessions and verification artifacts
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.xlsx
+*.xlsm
+*.xls
+backups/
+exports/
+.test-artifacts/
+.cache/
+.venv/
+venv/
+.pytest_cache/
+web/test-results/
+web/playwright-report/
+.env.*
+!.env.example

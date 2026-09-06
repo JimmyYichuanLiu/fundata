@@ -64,6 +64,9 @@ def client(tmp_path_factory):
     conn.row_factory = sqlite3.Row
     _create_schema(conn)
     seed = _seed_data(conn)
+    # These hand-calculated samples have no distributions; cumulative equals unit NAV.
+    conn.execute('UPDATE fund_nav_data SET accum_nav=unit_nav')
+    conn.commit()
     conn.close()
 
     from api import app, get_db
@@ -82,7 +85,8 @@ def client(tmp_path_factory):
             c.close()
 
     app.dependency_overrides[get_db] = _override_get_db
-    with TestClient(app, raise_server_exceptions=False) as c:
+    from tests.api_test_support import authenticated_client
+    with authenticated_client(app, db_path) as c:
         c._seed = seed
         yield c
     app.dependency_overrides.clear()
@@ -169,8 +173,8 @@ def test_batch_include_calculation(client):
     assert nav.status_code == 200
     items = nav.json()["items"]
     assert len(items) == 3
-    # 分批纳入: t0 只有F1，t1再平衡为50/50，t2应到1.10
-    assert abs(items[-1]["portfolio_nav"] - 1.10) < 1e-9
+    # 再平衡前先按当日净值估值：t1资产1.1，50/50配置后t2为1.21。
+    assert abs(items[-1]["portfolio_nav"] - 1.21) < 1e-9
 
 
 def test_batch_include_late_effective_no_nav(client):
@@ -268,4 +272,5 @@ def test_metrics_shape(client):
     data = m.json()
     for k in ["annualized_return", "annualized_vol", "max_drawdown", "sharpe", "monthly_win_rate"]:
         assert k in data
-        assert data[k] is not None
+    assert data['annualized_return'] is None  # less than 30 days, not zero
+    assert data['max_drawdown'] is not None

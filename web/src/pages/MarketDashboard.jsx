@@ -1,3 +1,4 @@
+import { useAuth } from '../context/AuthContext.jsx'
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
@@ -85,6 +86,7 @@ function createGradient(ctx, chartArea) {
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function MarketDashboard() {
+  const { canManage } = useAuth()
   const navigate = useNavigate()
   const chartRef = useRef(null)
 
@@ -98,6 +100,8 @@ export default function MarketDashboard() {
   const [chartLoading, setChartLoading] = useState(false)
   const [gradient, setGradient] = useState(null)
   const [syncError, setSyncError] = useState('')
+  const [dataError, setDataError] = useState('')
+  const [revision, setRevision] = useState(0)
 
   // Basis chart state
   const [basisData, setBasisData] = useState([])
@@ -134,6 +138,7 @@ export default function MarketDashboard() {
     const { signal } = controller
 
     setLoading(true)
+    setDataError('')
     Promise.all([
       fetchMarketIndices(signal),
       fetchMarketFutures(signal),
@@ -152,12 +157,12 @@ export default function MarketDashboard() {
         setLoading(false)
       })
       .catch(err => {
-        if (err.name !== 'AbortError') setLoading(false)
+        if (err.name !== 'AbortError') { setLoading(false); setDataError(err.message) }
       })
 
     return () => controller.abort()
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [revision])
 
   // ── Load real-time snapshots + auto refresh ───────────────────────────────
   const fetchRealtime = useCallback((signal) => {
@@ -212,10 +217,10 @@ export default function MarketDashboard() {
         setChartLoading(false)
       })
       .catch(err => {
-        if (err.name !== 'AbortError') setChartLoading(false)
+        if (err.name !== 'AbortError') { setChartLoading(false); setIndexDaily([]); setDataError(err.message) }
       })
     return () => controller.abort()
-  }, [selectedCode, chartDateParams])
+  }, [selectedCode, chartDateParams, revision])
 
   // ── Load basis data when selected index has a futures mapping ──────────────
   useEffect(() => {
@@ -396,7 +401,7 @@ export default function MarketDashboard() {
         <div className="max-w-6xl mx-auto px-4 py-4 flex flex-wrap items-center gap-4">
           <h1 className="text-xl font-bold text-gray-900 flex items-center gap-2">
             <span className="inline-flex items-center justify-center w-8 h-8 bg-indigo-600 text-white text-sm font-bold rounded">行</span>
-            A股行情
+            市场观察
           </h1>
           <div className="ml-auto flex items-center gap-3">
             {realtimeUpdatedAt && (
@@ -429,6 +434,7 @@ export default function MarketDashboard() {
               <span className="text-xs text-red-500">{syncError}</span>
             )}
             <button
+              hidden={!canManage}
               onClick={handleMarketSync}
               disabled={syncing}
               className="px-3 py-1.5 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
@@ -439,14 +445,15 @@ export default function MarketDashboard() {
         </div>
       </header>
 
-      <main className="max-w-6xl mx-auto px-4 py-6 space-y-6">
+      <main className="max-w-6xl mx-auto px-4 py-6 space-y-6"><div className="page-heading"><div><div className="eyebrow">MARKET / 市场观察</div><h2 className="text-2xl font-bold">指数与期货，掌握市场脉搏</h2><p>追踪 A 股主要指数与金融期货，辅助判断基金表现的市场背景。</p></div></div>
 
+        {dataError && <div className="notice notice-error" role="alert">行情读取失败：{dataError} <button className="button-secondary" onClick={() => setRevision(v => v + 1)}>重试</button></div>}
         {/* Empty state */}
         {!loading && indices.length === 0 && (
           <div className="bg-white rounded-xl shadow p-12 text-center">
             <p className="text-gray-400 text-sm mb-2">暂无行情数据</p>
             <p className="text-gray-300 text-xs">
-              请点击「立即同步」拉取行情数据
+              等待管理员同步行情数据后，即可查看市场走势。
             </p>
           </div>
         )}

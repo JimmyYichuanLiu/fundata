@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { fetchFund, fetchFundNav, fetchFundIssues, fetchIndexDaily, subtractDays, setFundBenchmark, setFundStrategy } from '../api.js'
+import { useAuth } from '../context/AuthContext.jsx'
 import { computeMetrics } from '../utils/metrics.js'
 import ChartTab, { BENCHMARK_OPTIONS } from './fund-detail/ChartTab.jsx'
 import MetricsTab from './fund-detail/MetricsTab.jsx'
@@ -54,6 +55,7 @@ function formatPct(val) {
 }
 
 export default function FundDetail() {
+  const { canManage } = useAuth()
   const { id } = useParams()
   const navigate = useNavigate()
 
@@ -177,8 +179,8 @@ export default function FundDetail() {
 
     const getVal = item => {
       if (navType === 'unit' || navType === 'return') return item.unit_nav
-      if (navType === 'adjusted') return item.adjusted_nav ?? item.unit_nav
-      return item.accumulated_nav ?? item.unit_nav
+      if (navType === 'adjusted') return item.adj_nav
+      return item.accumulated_nav
     }
     const sortedBench = [...benchmarkItems].sort((a, b) => a.trade_date.localeCompare(b.trade_date))
 
@@ -191,7 +193,7 @@ export default function FundDetail() {
       while (benchIdx < sortedBench.length - 1 && sortedBench[benchIdx + 1].trade_date <= fundDateYmd) {
         benchIdx++
       }
-      if (sortedBench[benchIdx].trade_date <= fundDateYmd) {
+      if (sortedBench[benchIdx].trade_date <= fundDateYmd && Number.isFinite(getVal(filteredItems[i])) && getVal(filteredItems[i]) > 0) {
         firstBenchClose = sortedBench[benchIdx].close
         firstCommonFundIdx = i
         break
@@ -226,7 +228,7 @@ export default function FundDetail() {
       }
 
       labels.push(item.nav_date)
-      fundNorm.push(getVal(item) / baseFundVal * normalizeBase)
+      fundNorm.push(getVal(item) == null ? null : getVal(item) / baseFundVal * normalizeBase)
       benchNorm.push(lastBenchClose != null ? lastBenchClose / baseBenchVal * normalizeBase : null)
     }
 
@@ -240,7 +242,7 @@ export default function FundDetail() {
   )
 
   const hasAdjusted = useMemo(
-    () => navItems.some(item => item.adjusted_nav != null),
+    () => navItems.some(item => item.adj_nav != null),
     [navItems],
   )
 
@@ -252,7 +254,7 @@ export default function FundDetail() {
     if (navItems.length < 2) return null
     const lastDate = navItems[navItems.length - 1].nav_date
     const yearStart = lastDate.slice(0, 4) + '-01-01'
-    const getVal = item => navType === 'unit' ? item.unit_nav : (item.accumulated_nav ?? item.unit_nav)
+    const getVal = item => navType === 'adjusted' ? item.adj_nav : navType === 'accumulated' ? item.accumulated_nav : item.unit_nav
     let firstVal = null
     for (const item of navItems) {
       if (item.nav_date >= yearStart) {
@@ -262,28 +264,30 @@ export default function FundDetail() {
     }
     if (!firstVal || firstVal <= 0) return null
     const lastVal = getVal(navItems[navItems.length - 1])
-    return (lastVal - firstVal) / firstVal * 100
+    return lastVal == null ? null : (lastVal - firstVal) / firstVal * 100
   }, [navItems, navType])
 
   const handleBenchmarkChange = useCallback((code) => {
     setBenchmarkCode(code)
     // Persist benchmark choice
-    if (fund) {
-      setFundBenchmark(fund.fund_id, code).catch(() => {})
+    if (fund && canManage) {
+      setFundBenchmark(fund.fund_id, code).catch(err => setError(err.message))
     }
-  }, [fund])
+  }, [fund, canManage])
 
   const handleSaveStrategy = useCallback(async () => {
-    if (!fund) return
+    if (!fund || !canManage) return
     setStratSaving(true)
     try {
       await setFundStrategy(fund.fund_id, editL1 || null, editL2 || null)
       setFund(prev => ({ ...prev, strategy_l1: editL1 || null, strategy_l2: editL2 || null }))
       setShowStratEdit(false)
+    } catch (err) {
+      setError(err.message)
     } finally {
       setStratSaving(false)
     }
-  }, [fund, editL1, editL2])
+  }, [fund, editL1, editL2, canManage])
 
   const onRetry = useCallback(() => setRetryCount(c => c + 1), [])
 
@@ -353,8 +357,8 @@ export default function FundDetail() {
           </button>
           {fund && (
             <div className="flex items-center gap-3 ml-2 min-w-0 flex-1 flex-wrap">
-              <div className="flex items-baseline gap-2 min-w-0">
-                <h1 className="text-lg font-bold text-gray-900 truncate">{fund.product_name || '—'}</h1>
+              <div className="flex items-baseline gap-2 min-w-0 flex-wrap">
+                <h1 className="text-lg font-bold text-gray-900 break-words">{fund.product_name || '—'}</h1>
                 <code className="text-xs text-gray-400 font-mono shrink-0">{fund.product_code}</code>
               </div>
               {/* Strategy badge */}
@@ -366,19 +370,20 @@ export default function FundDetail() {
                       onClick={() => setShowStratEdit(v => !v)}
                       className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium border"
                       style={{ backgroundColor: c.bg, color: c.text, borderColor: c.border }}
+                      disabled={!canManage}
                     >
                       {fund.strategy_l1}{fund.strategy_l2 ? ` · ${fund.strategy_l2}` : ''}
-                      <span className="opacity-60">✎</span>
+                      {canManage && <span className="opacity-60">✎</span>}
                     </button>
                   )
-                })() : (
+                })() : canManage ? (
                   <button
                     onClick={() => setShowStratEdit(v => !v)}
                     className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs border border-dashed border-gray-300 text-gray-400 hover:border-blue-400 hover:text-blue-500"
                   >+ 设置策略</button>
-                )}
+                ) : <span className="badge">未分类</span>}
                 {/* Strategy editor popover */}
-                {showStratEdit && (
+                {canManage && showStratEdit && (
                   <div
                     className="absolute left-0 top-7 z-50 bg-white rounded-xl shadow-xl border border-slate-200 p-3 w-72"
                     onClick={e => e.stopPropagation()}
@@ -480,7 +485,7 @@ export default function FundDetail() {
         </div>
       </header>
 
-      <main className="max-w-5xl mx-auto px-4 py-6 space-y-4">
+      <main className="max-w-5xl mx-auto px-4 py-6 space-y-4"><div className="eyebrow">FUND PROFILE / 基金档案</div>{fund && <p className="text-xs text-slate-500">有效净值截止 {navItems.at(-1)?.nav_date || '—'} · 数据来源 {[...new Set(navItems.map(item => item.data_source).filter(Boolean))].map(source => ({ email: '邮件采集', zx_excel: 'ZX 数据', manual: '手动录入' })[source] || source).join(' / ') || '—'}</p>}
         {loading ? (
           <div className="bg-white rounded-xl shadow p-6">
             <div className="flex gap-8">
