@@ -1,3 +1,4 @@
+import Icon from '../components/Icon.jsx'
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import {
   Chart as ChartJS,
@@ -592,20 +593,20 @@ export default function CrudeOilComparison() {
       <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700 p-4 shadow-sm">
         {loading && (
           <div className="flex items-center justify-center h-64 text-slate-400">
-            <span className="material-symbols-outlined animate-spin mr-2">progress_activity</span>
+            <Icon className="animate-spin mr-2">progress_activity</Icon>
             加载中…
           </div>
         )}
         {error && !loading && (
           <div className="flex flex-col items-center justify-center h-64 text-red-500 gap-2">
-            <span className="material-symbols-outlined text-3xl">error</span>
+            <Icon className="text-3xl">error</Icon>
             <p>{error}</p>
             <p className="text-sm text-slate-400">请先点击「立即同步」拉取数据，或检查 API 是否已启动</p>
           </div>
         )}
         {!loading && !error && items.length === 0 && (
           <div className="flex flex-col items-center justify-center h-64 text-slate-400 gap-2">
-            <span className="material-symbols-outlined text-4xl">data_usage</span>
+            <Icon className="text-4xl">data_usage</Icon>
             <p>暂无数据，请点击「立即同步」拉取原油行情</p>
           </div>
         )}
@@ -719,7 +720,7 @@ export default function CrudeOilComparison() {
           href="/crude/data"
           className="text-sm text-primary hover:underline flex items-center gap-1"
         >
-          <span className="material-symbols-outlined text-base">table_view</span>
+          <Icon className="text-base">table_view</Icon>
           更多数据（近30交易日）
         </a>
       </div>
@@ -889,7 +890,7 @@ export default function CrudeOilComparison() {
           </div>
           {hormuzLoading && (
             <div className="flex items-center gap-2 text-slate-400 text-sm">
-              <span className="material-symbols-outlined animate-spin text-base">progress_activity</span>
+              <Icon className="animate-spin text-base">progress_activity</Icon>
               加载中…
             </div>
           )}
@@ -933,7 +934,7 @@ export default function CrudeOilComparison() {
             href="/news"
             className="flex items-center justify-center gap-2 w-full sm:w-auto px-6 py-3 bg-slate-700 hover:bg-slate-600 text-white rounded-xl text-base font-semibold transition-colors shadow"
           >
-            <span className="material-symbols-outlined text-xl">newspaper</span>
+            <Icon className="text-xl">newspaper</Icon>
             查看全部新闻
           </a>
         </div>
@@ -963,7 +964,7 @@ export default function CrudeOilComparison() {
 
         {aisLoading && (
           <div className="flex items-center gap-2 text-slate-400 text-sm">
-            <span className="material-symbols-outlined animate-spin text-base">progress_activity</span>
+            <Icon className="animate-spin text-base">progress_activity</Icon>
             加载中…
           </div>
         )}
@@ -976,7 +977,7 @@ export default function CrudeOilComparison() {
 
         {!aisLoading && aisSnapshot?.api_key_configured && !aisSnapshot.snapshot && (
           <p className="text-sm text-red-500 font-medium flex items-center gap-1.5">
-            <span className="material-symbols-outlined text-base">warning</span>
+            <Icon className="text-base">warning</Icon>
             数据缺失，尝试更新中 — 请点击「立即采集」或等待定时任务
           </p>
         )}
@@ -1094,7 +1095,7 @@ export default function CrudeOilComparison() {
 
         {perspectivesLoading && (
           <div className="flex items-center gap-2 text-slate-400 text-sm">
-            <span className="material-symbols-outlined animate-spin text-base">progress_activity</span>
+            <Icon className="animate-spin text-base">progress_activity</Icon>
             加载中…
           </div>
         )}

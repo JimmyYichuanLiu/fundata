@@ -269,11 +269,11 @@ export default function PerformanceTab({
                   let yearFirst = null, yearLast = null
                   navItems.forEach(item => {
                     if (!item.nav_date || !item.nav_date.startsWith(year)) return
-                    const v = navType === 'unit'
+                    const v = navType === 'unit' || navType === 'return'
                       ? item.unit_nav
                       : navType === 'adjusted'
-                        ? (item.adjusted_nav ?? item.unit_nav)
-                        : (item.accumulated_nav ?? item.unit_nav)
+                        ? (item.adj_nav)
+                        : (item.accumulated_nav)
                     if (v == null) return
                     if (yearFirst === null) yearFirst = v
                     yearLast = v

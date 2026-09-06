@@ -4,6 +4,7 @@ import {
   LineElement, Title, Tooltip, Legend, Filler,
 } from 'chart.js'
 import { Line } from 'react-chartjs-2'
+import { alignComparisonSeries } from '../../utils/series.js'
 import { FUND_COLORS, BENCHMARK_OPTIONS } from '../../utils/metricDefs.js'
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler)
@@ -21,7 +22,8 @@ export default function ComparisonChart({
   compareList, navDataMap, benchItems, benchmarkCode, loading, commonStart,
 }) {
   // null = use commonStart (default), number = days from latest
-  const [activeDays, setActiveDays] = useState(null)
+  const activeDays = 0
+  const [absolute, setAbsolute] = useState(false)
 
   // Compute effective fromDate
   const fromDate = useMemo(() => {
@@ -62,19 +64,12 @@ export default function ComparisonChart({
     const sm = {}
     compareList.forEach(f => {
       const items = filteredMap[f.fund_id]
-      if (items.length === 0) { sm[f.fund_id] = sortedLabels.map(() => null); return }
-      const navByDate = new Map(items.map(i => [i.nav_date, i.unit_nav]))
-      const base = items[0].unit_nav || 1
-      let lastVal = null
-      sm[f.fund_id] = sortedLabels.map(d => {
-        if (navByDate.has(d)) lastVal = navByDate.get(d) / base
-        return lastVal
-      })
+      sm[f.fund_id] = alignComparisonSeries(items, sortedLabels, absolute)
     })
 
     // Benchmark normalized to 1
     let bs = []
-    if (benchItems.length > 0) {
+    if (!absolute && benchItems.length > 0) {
       const from = sortedLabels[0]
       const to   = sortedLabels[sortedLabels.length - 1]
       const filtered = benchItems.filter(i =>
@@ -95,15 +90,15 @@ export default function ComparisonChart({
     }
 
     return { labels: sortedLabels, seriesMap: sm, benchSeries: bs }
-  }, [compareList, navDataMap, benchItems, fromDate])
+  }, [compareList, navDataMap, benchItems, fromDate, absolute])
 
   const drawdownSeries = useMemo(() => {
     const result = {}
     compareList.forEach(f => {
-      const vals = (seriesMap[f.fund_id] || []).filter(v => v != null)
+      const vals = seriesMap[f.fund_id] || []
       if (vals.length < 2) return
-      let peak = vals[0]
-      result[f.fund_id] = vals.map(v => { if (v > peak) peak = v; return peak > 0 ? (v - peak) / peak * 100 : 0 })
+      let peak = vals.find(v => v != null)
+      result[f.fund_id] = vals.map(v => { if (v == null) return null; if (v > peak) peak = v; return peak > 0 ? (v - peak) / peak * 100 : 0 })
     })
     return result
   }, [compareList, seriesMap])
@@ -119,7 +114,7 @@ export default function ComparisonChart({
       pointRadius: 0,
       pointHoverRadius: 4,
       borderWidth: 2,
-      spanGaps: true,
+      spanGaps: false,
     }))
     if (benchSeries.length > 0 && benchmarkCode) {
       const bLabel = BENCHMARK_OPTIONS.find(o => o.code === benchmarkCode)?.label || benchmarkCode
@@ -168,6 +163,8 @@ export default function ComparisonChart({
         callbacks: {
           label: item => {
             const v = Number(item.raw)
+            if (item.raw == null) return item.dataset.label + ': —'
+            if (absolute) return item.dataset.label + ': ' + v.toFixed(4)
             const pct = (v - 1) * 100
             return `${item.dataset.label}: ${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`
           },
@@ -180,12 +177,12 @@ export default function ComparisonChart({
         position: 'right',
         grid: { color: '#f3f4f6' },
         ticks: {
-          callback: v => { const p = (Number(v) - 1) * 100; return (p >= 0 ? '+' : '') + p.toFixed(1) + '%' },
+          callback: v => { if (absolute) return Number(v).toFixed(4); const p = (Number(v) - 1) * 100; return (p >= 0 ? '+' : '') + p.toFixed(1) + '%' },
           font: { size: 10 }, color: '#9ca3af',
         },
       },
     },
-  }), [])
+  }), [absolute])
 
   const ddOptions = useMemo(() => ({
     responsive: true,
@@ -209,29 +206,8 @@ export default function ComparisonChart({
   return (
     <div className="space-y-4">
       <div className="bg-white rounded-xl shadow p-4">
-        {/* Range buttons */}
-        <div className="flex flex-wrap gap-2 mb-4">
-          <button
-            onClick={() => setActiveDays(null)}
-            className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-              activeDays === null ? 'bg-blue-600 text-white' : 'bg-blue-50 text-blue-600 hover:bg-blue-100'
-            }`}
-          >
-            共同区间
-          </button>
-          {RANGE_OPTIONS.map(opt => (
-            <button
-              key={opt.days}
-              onClick={() => setActiveDays(opt.days)}
-              className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-                activeDays === opt.days ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-              }`}
-            >
-              {opt.label}
-            </button>
-          ))}
-        </div>
-
+        <div className="flex items-center justify-between gap-3 mb-4"><h3 className="font-semibold">净值走势</h3><div className="flex gap-2"><button className={!absolute ? 'button-primary' : 'button-secondary'} onClick={() => setAbsolute(false)}>归一化收益</button><button className={absolute ? 'button-primary' : 'button-secondary'} onClick={() => setAbsolute(true)}>绝对净值</button></div></div>
+        {absolute && benchmarkCode && <p className="text-xs text-slate-500 mb-3">绝对净值模式不展示量纲不同的基准指数。</p>}
         {loading ? (
           <div className="shimmer rounded h-72" />
         ) : labels.length === 0 ? (

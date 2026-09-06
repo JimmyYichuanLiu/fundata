@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import Layout from './components/Layout.jsx'
 import FundList from './pages/FundList.jsx'
 import FundDetail from './pages/FundDetail.jsx'
@@ -13,10 +13,17 @@ import PortfolioDetailPage from './pages/PortfolioDetailPage.jsx'
 // import CrudeDataTable from './pages/CrudeDataTable.jsx'
 // import NewsPage from './pages/NewsPage.jsx'
 import { CompareProvider } from './context/CompareContext.jsx'
+import { AuthProvider } from './context/AuthContext.jsx'
+import PortfolioListPage from './pages/PortfolioListPage.jsx'
+import AdminPage from './pages/AdminPage.jsx'
+import PageState from './components/PageState.jsx'
+
+function ComparisonRedirect() { const location = useLocation(); return <Navigate to={'/compare' + location.search} replace /> }
 
 export default function App() {
   return (
     <BrowserRouter>
+      <AuthProvider>
       <CompareProvider>
         <Layout>
           <Routes>
@@ -24,8 +31,11 @@ export default function App() {
             <Route path="/fund/:id" element={<FundDetail />} />
             <Route path="/fund/:id/nav" element={<NavDetailPage />} />
             <Route path="/market" element={<MarketDashboard />} />
-            <Route path="/compare" element={<FundComparison />} />
-            <Route path="/compare/v2" element={<ComparisonPage />} />
+            <Route path="/compare" element={<ComparisonPage />} />
+            <Route path="/compare/v2" element={<ComparisonRedirect />} />
+            <Route path="/portfolios" element={<PortfolioListPage />} />
+            <Route path="/admin" element={<AdminPage />} />
+            <Route path="*" element={<PageState title="页面不存在">请通过左侧导航进入研究页面。</PageState>} />
             <Route path="/portfolios/new" element={<PortfolioBuilderPage />} />
             <Route path="/portfolios/:id" element={<PortfolioDetailPage />} />
             <Route path="/basis" element={<BasisAnalysis />} />
@@ -35,6 +45,7 @@ export default function App() {
           </Routes>
         </Layout>
       </CompareProvider>
+      </AuthProvider>
     </BrowserRouter>
   )
 }

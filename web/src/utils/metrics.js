@@ -48,12 +48,13 @@ export function computeMetrics(items, navType = 'unit') {
   if (!items || items.length < 2) return null
 
   const getVal = item => {
-    if (navType === 'adjusted') return item.adj_nav ?? item.unit_nav
-    if (navType === 'unit') return item.unit_nav
-    return item.accumulated_nav ?? item.unit_nav
+    if (navType === 'adjusted') return item.adj_nav
+    if (navType === 'unit' || navType === 'return') return item.unit_nav
+    return item.accumulated_nav
   }
 
-  const vals = items.map(getVal).filter(v => v != null && !isNaN(v) && isFinite(v))
+  items = items.filter(item => Number.isFinite(getVal(item)) && normalizeDate(item.nav_date))
+  const vals = items.map(getVal)
   if (vals.length < 2) return null
 
   const dates = items.map(i => normalizeDate(i.nav_date)).filter(Boolean)
@@ -204,9 +205,9 @@ export function computeBenchmarkMetrics(fundItems, benchItems, navType = 'unit')
   if (!fundItems || !benchItems || fundItems.length < 2 || benchItems.length < 2) return null
 
   const getVal = item => {
-    if (navType === 'adjusted') return item.adj_nav ?? item.unit_nav
-    if (navType === 'unit') return item.unit_nav
-    return item.accumulated_nav ?? item.unit_nav
+    if (navType === 'adjusted') return item.adj_nav
+    if (navType === 'unit' || navType === 'return') return item.unit_nav
+    return item.accumulated_nav
   }
 
   const fundMap = new Map()
@@ -273,9 +274,9 @@ export function computeTopDrawdowns(items, navType = 'unit', count = 5) {
   if (!items || items.length < 2) return []
 
   const getVal = item => {
-    if (navType === 'adjusted') return item.adj_nav ?? item.unit_nav
-    if (navType === 'unit') return item.unit_nav
-    return item.accumulated_nav ?? item.unit_nav
+    if (navType === 'adjusted') return item.adj_nav
+    if (navType === 'unit' || navType === 'return') return item.unit_nav
+    return item.accumulated_nav
   }
 
   const vals = []
@@ -331,9 +332,9 @@ export function computePeriodicReturns(items, navType = 'unit', frequency = 'mon
   if (!items || items.length < 2) return []
 
   const getVal = item => {
-    if (navType === 'adjusted') return item.adj_nav ?? item.unit_nav
-    if (navType === 'unit') return item.unit_nav
-    return item.accumulated_nav ?? item.unit_nav
+    if (navType === 'adjusted') return item.adj_nav
+    if (navType === 'unit' || navType === 'return') return item.unit_nav
+    return item.accumulated_nav
   }
 
   function getPeriodKey(dateStr) {
@@ -364,13 +365,13 @@ export function computePeriodicReturns(items, navType = 'unit', frequency = 'mon
     if (v == null || isNaN(v) || !item.nav_date) return
     const key = getPeriodKey(item.nav_date)
     if (!key) return
-    if (!groups.has(key)) groups.set(key, { first: v, last: v, date: item.nav_date })
-    else groups.get(key).last = v
+    if (!groups.has(key)) groups.set(key, { first: v, last: v, date: item.nav_date, count: 1 })
+    else { groups.get(key).last = v; groups.get(key).count += 1 }
   })
 
   const result = []
   for (const [period, g] of groups) {
-    if (g.first > 0) result.push({ period, return: +((g.last - g.first) / g.first * 100).toFixed(4) })
+    if (g.first > 0) result.push({ period, return: g.count >= 2 ? +((g.last - g.first) / g.first * 100).toFixed(4) : null })
   }
   return result
 }
@@ -382,9 +383,9 @@ export function computeExcessMetrics(fundItems, benchItems, navType = 'unit', mo
   if (!fundItems || !benchItems || fundItems.length < 2 || benchItems.length < 2) return null
 
   const getVal = item => {
-    if (navType === 'adjusted') return item.adj_nav ?? item.unit_nav
-    if (navType === 'unit') return item.unit_nav
-    return item.accumulated_nav ?? item.unit_nav
+    if (navType === 'adjusted') return item.adj_nav
+    if (navType === 'unit' || navType === 'return') return item.unit_nav
+    return item.accumulated_nav
   }
 
   const fundMap = new Map()

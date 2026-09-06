@@ -1,3 +1,4 @@
+import { useAuth } from '../../context/AuthContext.jsx'
 import { useState, useRef, useMemo, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
@@ -158,6 +159,7 @@ export default function ChartTab({
   setExcessMode,
 }) {
   const navigate = useNavigate()
+  const { canManage } = useAuth()
   const chartRef = useRef(null)
   const [gradient, setGradient] = useState(null)
 
@@ -263,13 +265,13 @@ export default function ChartTab({
       const base = filteredItems.length > 0 ? (filteredItems[0].unit_nav || 1) : 1
       values = filteredItems.map(i => i.unit_nav / base)
     } else if (navType === 'adjusted') {
-      const raw = filteredItems.map(i => i.adjusted_nav ?? i.unit_nav)
-      const base = raw[0] || 1
-      values = raw.map(v => v / base)
+      const raw = filteredItems.map(i => i.adj_nav)
+      const base = raw.find(v => Number.isFinite(v) && v > 0) || 1
+      values = raw.map(v => Number.isFinite(v) ? v / base : null)
     } else if (navType === 'accumulated') {
-      const raw = filteredItems.map(i => i.accumulated_nav ?? i.unit_nav)
-      const base = raw[0] || 1
-      values = raw.map(v => v / base)
+      const raw = filteredItems.map(i => i.accumulated_nav)
+      const base = raw.find(v => Number.isFinite(v) && v > 0) || 1
+      values = raw.map(v => Number.isFinite(v) ? v / base : null)
     } else {
       // unit
       const base = filteredItems.length > 0 ? (filteredItems[0].unit_nav || 1) : 1
@@ -326,9 +328,9 @@ export default function ChartTab({
     }
 
     const pointColors = filteredItems.map(i =>
-      i.source_id === null ? 'rgba(234,88,12,0.8)' : 'transparent'
+      i.data_source === 'manual' ? 'rgba(234,88,12,0.8)' : 'transparent'
     )
-    const pointRadii = filteredItems.map(i => i.source_id === null ? 4 : 0)
+    const pointRadii = filteredItems.map(i => i.data_source === 'manual' ? 4 : 0)
     return {
       labels: chartData.labels,
       datasets: [
@@ -353,16 +355,17 @@ export default function ChartTab({
   const drawdownSeries = useMemo(() => {
     if (filteredItems.length < 2) return null
     const getVal = item => {
-      if (navType === 'adjusted') return item.adjusted_nav ?? item.unit_nav
-      return navType === 'unit' ? item.unit_nav : (item.accumulated_nav ?? item.unit_nav)
+      if (navType === 'adjusted') return item.adj_nav
+      return navType === 'unit' || navType === 'return' ? item.unit_nav : item.accumulated_nav
     }
     let peak = getVal(filteredItems[0])
     const dd = filteredItems.map(item => {
       const v = getVal(item)
-      if (v > peak) peak = v
+      if (!Number.isFinite(v)) return null
+      if (peak == null || v > peak) peak = v
       return peak > 0 ? ((v - peak) / peak) * 100 : 0
     })
-    if (Math.min(...dd) >= -0.01) return null
+    if (Math.min(...dd.filter(v => v != null)) >= -0.01) return null
     return dd
   }, [filteredItems, navType])
 
@@ -549,7 +552,7 @@ export default function ChartTab({
     }
   }, [onRetry])
 
-  const manualItems = navItems.filter(i => i.source_id === null)
+  const manualItems = navItems.filter(i => i.data_source === 'manual')
   const hasBench = !!(benchMetrics && benchmarkCode)
 
   return (
@@ -643,7 +646,7 @@ export default function ChartTab({
                 收益率
               </button>
             </div>
-            {fund && (
+            {fund && canManage && (
               <button
                 onClick={() => setShowNavForm(true)}
                 className="px-3 py-1 rounded-full text-xs font-medium bg-orange-50 text-orange-700 border border-orange-200 hover:bg-orange-100 transition-colors"
@@ -692,6 +695,8 @@ export default function ChartTab({
           </div>
         )}
 
+        {navType === 'adjusted' && filteredItems.some(item => item.adj_nav == null) && <div className="notice">部分日期无法计算复权净值，缺失点在图表中留空。{filteredItems.find(item => item.adj_nav_reason)?.adj_nav_reason}</div>}
+        {!hasAdjusted && <div className="notice">当前基金暂无可用复权净值。{navItems.find(item => item.adj_nav_reason)?.adj_nav_reason || '需要完整且连续的单位与累计净值计算。'}</div>}
         {/* Main chart */}
         {loading ? (
           <div className="shimmer rounded-lg h-72" />
@@ -833,7 +838,7 @@ export default function ChartTab({
       )}
 
       {/* Manual records list */}
-      {!loading && manualItems.length > 0 && (
+      {canManage && !loading && manualItems.length > 0 && (
         <div className="bg-white rounded-xl shadow p-4">
           <h3 className="text-sm font-semibold text-gray-700 mb-3">
             手动录入记录
@@ -876,7 +881,7 @@ export default function ChartTab({
       )}
 
       {/* Manual entry modal */}
-      {showNavForm && (
+      {canManage && showNavForm && (
         <div
           className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4"
           onClick={() => { setShowNavForm(false); setNavForm({ nav_date: '', unit_nav: '', accumulated_nav: '' }); setNavFormError('') }}
