@@ -19,6 +19,7 @@
 """
 
 import os
+import re
 import imaplib
 import email
 from email.header import decode_header
@@ -32,132 +33,9 @@ from smart_extractor import extract_and_normalize
 
 
 def init_database(db_path):
-    """初始化 SQLite 数据库，创建所有必要的表"""
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-
-    # 邮件来源表（须在 fund_nav_data 之前创建，以便外键引用）
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS email_sources (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            邮件主题 TEXT,
-            邮件发件人 TEXT,
-            邮件日期 TEXT,
-            附件文件名 TEXT,
-            sheet名称 TEXT,
-            记录时间 DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-
-    # 基金主表：每个产品代码对应唯一 fund_id，按首次录入时间自增
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS funds (
-            fund_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            fund_code TEXT NOT NULL UNIQUE,
-            fund_name TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-
-    # 基金净值数据表
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS fund_nav_data (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            fund_id INTEGER REFERENCES funds(fund_id),
-            fund_name TEXT,
-            fund_code TEXT NOT NULL,
-            nav_date TEXT NOT NULL,
-            unit_nav REAL NOT NULL,
-            accum_nav REAL,
-            inserted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            source_id INTEGER REFERENCES email_sources(id),
-            UNIQUE(fund_code, nav_date)
-        )
-    ''')
-
-    # 迁移：为已有数据库添加 source_id 列
-    try:
-        cursor.execute('ALTER TABLE fund_nav_data ADD COLUMN source_id INTEGER REFERENCES email_sources(id)')
-        conn.commit()
-    except Exception:
-        pass  # 列已存在则忽略
-
-    # 迁移：为已有数据库添加 fund_id 列
-    try:
-        cursor.execute('ALTER TABLE fund_nav_data ADD COLUMN fund_id INTEGER REFERENCES funds(fund_id)')
-        conn.commit()
-    except Exception:
-        pass  # 列已存在则忽略
-
-    # 迁移：为已有数据库添加 adjusted_nav 列（复权累计净值）
-    try:
-        cursor.execute('ALTER TABLE fund_nav_data ADD COLUMN adjusted_nav REAL')
-        conn.commit()
-    except Exception:
-        pass  # 列已存在则忽略
-
-    # 迁移：从现有 fund_nav_data 填充 funds 表
-    cursor.execute('SELECT COUNT(*) FROM funds')
-    if cursor.fetchone()[0] == 0:
-        cursor.execute('''
-            INSERT OR IGNORE INTO funds (fund_code, fund_name, created_at)
-            SELECT fund_code, MIN(fund_name), MIN(inserted_at)
-            FROM fund_nav_data
-            WHERE fund_code IS NOT NULL
-            GROUP BY fund_code
-            ORDER BY MIN(inserted_at)
-        ''')
-        conn.commit()
-
-    # 迁移：回填 fund_nav_data 中 fund_id 为 NULL 的已有记录
-    cursor.execute('''
-        UPDATE fund_nav_data
-        SET fund_id = (SELECT fund_id FROM funds WHERE funds.fund_code = fund_nav_data.fund_code)
-        WHERE fund_id IS NULL AND fund_code IS NOT NULL
-    ''')
-    conn.commit()
-
-    # 创建索引以提高查询性能
-    cursor.execute('''
-        CREATE INDEX IF NOT EXISTS idx_product_code
-        ON fund_nav_data(fund_code)
-    ''')
-
-    cursor.execute('''
-        CREATE INDEX IF NOT EXISTS idx_nav_date
-        ON fund_nav_data(nav_date)
-    ''')
-
-    cursor.execute('''
-        CREATE INDEX IF NOT EXISTS idx_fund_id
-        ON fund_nav_data(fund_id)
-    ''')
-
-    # 增量同步状态表：记录上次处理到的最大UID和UIDVALIDITY
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS sync_state (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    ''')
-
-    # 提取/识别失败记录表：持久化所有无法处理的邮件附件信息
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS extraction_failures (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            失败时间 DATETIME DEFAULT CURRENT_TIMESTAMP,
-            邮件主题 TEXT,
-            邮件发件人 TEXT,
-            邮件日期 TEXT,
-            附件文件名 TEXT,
-            sheet名称 TEXT,
-            失败原因 TEXT
-        )
-    ''')
-
-    conn.commit()
-    print(f"SQLite 数据库初始化成功: {db_path}")
-    return conn
+    """Initialize through the shared, backed-up versioned migration."""
+    from fund_store import initialize_database
+    return initialize_database(db_path)
 
 
 def get_sync_state(conn):
@@ -199,7 +77,6 @@ def get_or_create_fund_id(conn, product_code, product_name=None):
         'INSERT INTO funds (fund_code, fund_name) VALUES (?, ?)',
         (product_code, product_name)
     )
-    conn.commit()
     return cursor.lastrowid
 
 
@@ -210,7 +87,6 @@ def insert_email_source(conn, email_subject, email_sender, email_date, filename,
         INSERT INTO email_sources (邮件主题, 邮件发件人, 邮件日期, 附件文件名, sheet名称)
         VALUES (?, ?, ?, ?, ?)
     ''', (email_subject, email_sender, email_date, filename, sheet_name))
-    conn.commit()
     return cursor.lastrowid
 
 
@@ -262,119 +138,40 @@ def get_attachment_filename(part):
 
 
 def extract_excel_attachments(msg, failed_extractions):
-    """提取邮件中的Excel附件并使用智能提取器读取数据
-
-    Args:
-        msg: 邮件消息对象
-        failed_extractions: 失败记录列表，用于记录提取失败的附件
-
-    Returns:
-        dataframes: 成功提取的数据列表
-    """
+    """Extract every worksheet, keeping exact attachment/sheet provenance."""
     dataframes = []
-    has_excel = False  # 标记是否有Excel附件
-
-    if msg.is_multipart():
-        for part in msg.walk():
-            content_disposition = str(part.get("Content-Disposition"))
-            content_type = part.get_content_type()
-
-            # 检查是否是附件
-            if "attachment" in content_disposition:
-                filename = get_attachment_filename(part)
-
-                if filename:
-                    # 检查是否是Excel文件
-                    if filename.lower().endswith(('.xls', '.xlsx', '.xlsm')):
-                        has_excel = True
-
-                        try:
-                            # 获取附件数据
-                            attachment_data = part.get_payload(decode=True)
-
-                            # 直接从内存读取Excel，不保存到本地
-                            extraction_success = False
-                            try:
-                                # 使用BytesIO将二进制数据转换为文件对象
-                                excel_buffer = BytesIO(attachment_data)
-                                # 重要：使用 header=None 读取原始数据
-                                df = pd.read_excel(excel_buffer, header=None)
-
-                                # 使用智能提取器提取数据（返回列表）
-                                extracted_data = extract_and_normalize(df)
-
-                                if extracted_data:
-                                    # extracted_data 是 list of dict，直接构建多行DataFrame
-                                    df_normalized = pd.DataFrame(extracted_data)
-
-                                    dataframes.append({
-                                        'filename': filename,
-                                        'data': df_normalized,
-                                        'sheet_name': 'default',
-                                        'extracted_data': extracted_data
-                                    })
-                                    extraction_success = True
-                                else:
-                                    failed_extractions.append({
-                                        'filename': filename,
-                                        'sheet_name': 'default',
-                                        'reason': '无法识别数据格式',
-                                        'product_name': None,
-                                        'product_code': None
-                                    })
-
-                            except Exception as e:
-                                # 如果有多个sheet，尝试读取所有sheet
-                                try:
-                                    excel_buffer = BytesIO(attachment_data)
-                                    excel_file = pd.ExcelFile(excel_buffer)
-                                    sheet_success = False
-                                    for sheet_name in excel_file.sheet_names:
-                                        excel_buffer = BytesIO(attachment_data)
-                                        df = pd.read_excel(excel_buffer, sheet_name=sheet_name, header=None)
-
-                                        # 使用智能提取器（返回列表）
-                                        extracted_data = extract_and_normalize(df)
-
-                                        if extracted_data:
-                                            df_normalized = pd.DataFrame(extracted_data)
-                                            dataframes.append({
-                                                'filename': filename,
-                                                'data': df_normalized,
-                                                'sheet_name': sheet_name,
-                                                'extracted_data': extracted_data
-                                            })
-                                            sheet_success = True
-                                            extraction_success = True
-                                        else:
-                                            failed_extractions.append({
-                                                'filename': filename,
-                                                'sheet_name': sheet_name,
-                                                'reason': '无法识别数据格式',
-                                                'product_name': None,
-                                                'product_code': None
-                                            })
-
-                                except Exception as e2:
-                                    if not extraction_success:
-                                        failed_extractions.append({
-                                            'filename': filename,
-                                            'sheet_name': 'unknown',
-                                            'reason': f'读取工作表失败: {str(e2)}',
-                                            'product_name': None,
-                                            'product_code': None
-                                        })
-
-                        except Exception as e:
-                            failed_extractions.append({
-                                'filename': filename,
-                                'sheet_name': 'unknown',
-                                'reason': f'处理附件失败: {str(e)}',
-                                'product_name': None,
-                                'product_code': None
-                            })
-
+    has_excel = False
+    for part in msg.walk():
+        filename = get_attachment_filename(part)
+        if not filename or not filename.lower().endswith(('.xls', '.xlsx', '.xlsm')):
+            continue
+        has_excel = True
+        try:
+            with pd.ExcelFile(BytesIO(part.get_payload(decode=True))) as workbook:
+                for sheet_name in workbook.sheet_names:
+                    try:
+                        raw = pd.read_excel(workbook, sheet_name=sheet_name, header=None)
+                        extracted = extract_and_normalize(raw)
+                        if not extracted:
+                            raise ValueError('无法识别数据格式')
+                        dataframes.append({'filename': filename, 'sheet_name': sheet_name,
+                                           'data': pd.DataFrame(extracted), 'extracted_data': extracted})
+                    except Exception as exc:
+                        failed_extractions.append({'filename': filename, 'sheet_name': sheet_name, 'reason': str(exc)})
+        except Exception as exc:
+            failed_extractions.append({'filename': filename, 'sheet_name': '', 'reason': str(exc)})
     return dataframes, has_excel
+
+
+def normalize_nav_date_for_db(value):
+    """Return a real NAV date as ISO text, or ``None`` when it is invalid."""
+    from fund_store import normalize_nav_date
+    return normalize_nav_date(value)
+
+
+def is_valid_nav_date(value):
+    """Return whether a NAV date has a supported shape and is a real date."""
+    return normalize_nav_date_for_db(value) is not None
 
 
 def insert_data_to_db(conn, df, failed_inserts, source_id=None):
@@ -396,14 +193,38 @@ def insert_data_to_db(conn, df, failed_inserts, source_id=None):
 
     for _, row in df.iterrows():
         try:
+            from fund_store import positive_number
+            product_code = row.get('产品代码')
+            code_missing = product_code is None or pd.isna(product_code) or not str(product_code).strip()
+            accum_nav = row.get('累计单位净值')
+            if accum_nav is not None and pd.isna(accum_nav):
+                accum_nav = None
+            numeric_invalid = (not positive_number(row.get('单位净值')) or
+                               (accum_nav is not None and not positive_number(accum_nav)))
+            if code_missing or numeric_invalid:
+                failed_inserts.append({'product_name': row.get('产品名称'), 'product_code': product_code,
+                                       'reason': '数据校验失败: 产品代码缺失或净值不是有限正数', 'data': row.to_dict()})
+                skipped_count += 1
+                continue
             # 验证必需字段
-            if not row.get('产品代码') or not row.get('净值日期') or not row.get('单位净值'):
-                reason = "缺少必需字段: "
+            raw_nav_date = row.get('净值日期')
+            nav_date_missing = (
+                raw_nav_date is None
+                or pd.isna(raw_nav_date)
+                or not str(raw_nav_date).strip()
+            )
+            normalized_nav_date = normalize_nav_date_for_db(raw_nav_date)
+            invalid_nav_date = not nav_date_missing and normalized_nav_date is None
+            if (not row.get('产品代码') or nav_date_missing or
+                    not row.get('单位净值') or invalid_nav_date):
+                reason = "数据校验失败: "
                 missing_fields = []
                 if not row.get('产品代码'):
                     missing_fields.append('产品代码')
-                if not row.get('净值日期'):
+                if nav_date_missing:
                     missing_fields.append('净值日期')
+                elif invalid_nav_date:
+                    missing_fields.append('净值日期格式无效')
                 if not row.get('单位净值'):
                     missing_fields.append('单位净值')
                 reason += ', '.join(missing_fields)
@@ -414,6 +235,28 @@ def insert_data_to_db(conn, df, failed_inserts, source_id=None):
                     'reason': reason,
                     'data': row.to_dict()
                 })
+                skipped_count += 1
+                continue
+
+            # 历史邮件数据中仍有 YYYYMMDD；同时检查两种表示，避免同日逻辑重复。
+            compact_nav_date = normalized_nav_date.replace('-', '')
+            existing_nav = cursor.execute(
+                '''
+                SELECT id, unit_nav, accum_nav
+                FROM fund_nav_data
+                WHERE fund_code = ? AND nav_date IN (?, ?)
+                LIMIT 1
+                ''',
+                (row.get('产品代码'), normalized_nav_date, compact_nav_date)
+            ).fetchone()
+            if existing_nav:
+                existing_accum = float(existing_nav[2]) if existing_nav[2] is not None else None
+                incoming_accum = float(accum_nav) if accum_nav is not None else None
+                if float(existing_nav[1]) != float(row.get('单位净值')) or existing_accum != incoming_accum:
+                    from fund_store import record_ingestion_conflict
+                    record_ingestion_conflict(conn,existing_nav[0],row.to_dict(),source_id)
+                    failed_inserts.append({'product_name':row.get('产品名称'),'product_code':product_code,
+                                           'reason':'同基金同日期净值冲突，已保留证据且未覆盖原值','data':row.to_dict()})
                 skipped_count += 1
                 continue
 
@@ -428,9 +271,9 @@ def insert_data_to_db(conn, df, failed_inserts, source_id=None):
                 fund_id,
                 row.get('产品名称'),
                 row.get('产品代码'),
-                row.get('净值日期'),
+                normalized_nav_date,
                 row.get('单位净值'),
-                row.get('累计单位净值'),
+                accum_nav,
                 source_id,
                 'email'
             ))
@@ -451,100 +294,14 @@ def insert_data_to_db(conn, df, failed_inserts, source_id=None):
             })
             skipped_count += 1
 
-    conn.commit()
     return inserted_count, skipped_count
 
 
 def compute_adjusted_nav(conn, product_code):
-    """增量计算指定基金的复权累计净值（adjusted_nav），从最早的 NULL 行开始往后算。
-
-    公式（初始值 = 1.0）：
-      1. 累计分红[t] = accumulated_nav[t] - unit_nav[t]
-      2. 当期分红[t] = 累计分红[t] - 累计分红[t-1]
-      3. Rt[t]       = (当期分红[t] + unit_nav[t]) / unit_nav[t-1] - 1
-      4. adjusted[t] = adjusted[t-1] * (1 + Rt[t])
-    当 accumulated_nav 为 NULL 时，视为等于 unit_nav（即无分红）。
-    """
-    rows = conn.execute(
-        """
-        SELECT id, nav_date, unit_nav, accum_nav, adjusted_nav
-        FROM fund_nav_data
-        WHERE fund_code = ? AND nav_date IS NOT NULL AND unit_nav IS NOT NULL AND unit_nav > 0
-        ORDER BY nav_date ASC
-        """,
-        (product_code,)
-    ).fetchall()
-
-    if not rows:
-        return
-
-    # 找到第一条 adjusted_nav 为 NULL 的行
-    first_null_idx = next((i for i, r in enumerate(rows) if r[4] is None), None)
-    if first_null_idx is None:
-        return  # 已全部计算完毕
-
-    updates = []
-
-    if first_null_idx == 0:
-        # 从头开始：第一条的 adjusted_nav = 1.0
-        adjusted = 1.0
-        try:
-            unit0 = float(rows[0][2])
-        except (TypeError, ValueError):
-            return
-        acc0_raw = rows[0][3]
-        try:
-            prev_acc = float(acc0_raw) if acc0_raw is not None else unit0
-        except (TypeError, ValueError):
-            prev_acc = unit0
-        prev_unit = unit0
-        updates.append((adjusted, rows[0][0]))
-        start_idx = 1
-    else:
-        # 从上一条已算好的行衔接
-        last = rows[first_null_idx - 1]
-        adjusted  = last[4]
-        try:
-            prev_unit = float(last[2])
-        except (TypeError, ValueError):
-            return
-        prev_acc_raw = last[3]
-        try:
-            prev_acc = float(prev_acc_raw) if prev_acc_raw is not None else prev_unit
-        except (TypeError, ValueError):
-            prev_acc = prev_unit
-        start_idx = first_null_idx
-
-    for i in range(start_idx, len(rows)):
-        row = rows[i]
-        try:
-            unit = float(row[2])
-        except (TypeError, ValueError):
-            continue
-        acc_raw = row[3]
-        try:
-            acc = float(acc_raw) if acc_raw is not None else unit
-        except (TypeError, ValueError):
-            acc = unit
-
-        div_cum_curr = acc      - unit
-        div_cum_prev = prev_acc - prev_unit
-        dividend     = div_cum_curr - div_cum_prev
-
-        if prev_unit > 0:
-            rt = (dividend + unit) / prev_unit - 1
-            adjusted = adjusted * (1 + rt)
-
-        updates.append((adjusted, row[0]))
-        prev_unit = unit
-        prev_acc  = acc
-
-    if updates:
-        conn.executemany(
-            "UPDATE fund_nav_data SET adjusted_nav = ? WHERE id = ?",
-            updates
-        )
-        conn.commit()
+    """Compatibility entry point using canonical adj_nav and full-series math."""
+    from fund_store import recalculate_adj_nav
+    recalculate_adj_nav(conn, product_code)
+    conn.commit()
 
 
 def print_failure_report(failed_extractions, failed_inserts):
@@ -734,292 +491,22 @@ def get_email_content(msg):
     return content
 
 
-def connect_and_fetch_email(email_user, email_pwd, db_path):
-    """连接到163邮箱并增量拉取新邮件，提取附件数据到数据库"""
-
-    # 初始化数据库，读取上次同步状态
-    conn = init_database(db_path)
-    last_uid, stored_uidvalidity = get_sync_state(conn)
-
-    # 步骤1: 连接到IMAP服务器
-    print("正在连接到163邮箱IMAP服务器...")
-    imap_host = "imap.163.com"
-
-    try:
-        # 使用SSL连接
-        imap_client = imaplib.IMAP4_SSL(imap_host, 993)
-        print(f"成功连接到 {imap_host}")
-    except Exception as e:
-        print(f"连接失败: {e}")
-        return
-
-    # 步骤2: 登录
-    print(f"正在登录邮箱: {email_user}")
-    try:
-        imap_client.login(email_user, email_pwd)
-        print("登录成功！")
-    except Exception as e:
-        print(f"登录失败: {e}")
-        print("\n提示：")
-        print("1. 请确保已在163邮箱设置中开启IMAP服务")
-        print("2. 使用的是授权码而不是登录密码")
-        print("3. 获取授权码路径：邮箱设置 -> POP3/SMTP/IMAP -> 开启IMAP服务 -> 获取授权码")
-        return
-
-    # 步骤3: 登录后立即发送ID命令（163邮箱必需，必须在SELECT之前）
-    print("正在发送客户端标识信息...")
-    try:
-        # 注册ID命令（如果还未注册）
-        if 'ID' not in imaplib.Commands:
-            imaplib.Commands['ID'] = ('AUTH',)
-
-        # 构造ID命令参数 - 163邮箱要求的格式
-        # 这是关键步骤，用于避免"Unsafe Login"错误
-        args = ("name", "myclient", "contact", email_user, "version", "1.0.0", "vendor", "myclient")
-
-        # 格式化为IMAP ID命令格式
-        typ, dat = imap_client._simple_command('ID', '("' + '" "'.join(args) + '")')
-
-        if typ == 'OK':
-            print("客户端标识信息发送成功")
-        else:
-            print(f"警告: ID命令返回状态: {typ}")
-    except Exception as e:
-        print(f"警告: 发送ID命令时出错: {e}")
-        print("继续尝试访问邮箱...")
-
-    # 步骤4: 选择收件箱
-    print("\n正在打开收件箱...")
-    try:
-        # 使用SELECT命令打开收件箱
-        status, messages = imap_client.select("INBOX")
-
-        # 检查返回状态
-        if status != 'OK':
-            print(f"打开收件箱失败，服务器返回状态: {status}")
-            print(f"详细信息: {messages}")
-            imap_client.logout()
-            return
-
-        # 解析邮件数量
-        try:
-            total_messages = int(messages[0])
-            print(f"收件箱中共有 {total_messages} 封邮件")
-        except (ValueError, TypeError) as e:
-            print(f"无法解析邮件数量，服务器返回: {messages}")
-            print("\n可能的原因和解决方法：")
-            print("1. 163邮箱的安全限制 - 需要使用正确的授权码（不是登录密码）")
-            print("2. 需要在163邮箱网页端确认开启IMAP服务")
-            print("3. 授权码可能已过期，需要重新生成")
-            print("4. 可能需要授权第三方客户端访问，请访问：")
-            print(f"   http://config.mail.163.com/settings/imap/index.jsp?uid={email_user}")
-            print("   按照页面提示完成短信验证授权")
-            imap_client.logout()
-            return
-
-        # 获取服务器的 UIDVALIDITY，用于检测邮箱是否被重建
-        uidvalidity_list = imap_client.untagged_responses.get('UIDVALIDITY', [b'0'])
-        server_uidvalidity = uidvalidity_list[0].decode() if uidvalidity_list else '0'
-
-    except Exception as e:
-        print(f"打开收件箱失败: {e}")
-        imap_client.logout()
-        return
-
-    if total_messages == 0:
-        print("收件箱为空！")
-        imap_client.logout()
-        return
-
-    # 步骤5: 增量拉取新邮件（基于 IMAP UID）
-    print("\n开始处理邮件...")
-    print("="*80)
-
-    try:
-        # 判断是否需要全量扫描
-        # 条件：首次运行（last_uid==0）或 UIDVALIDITY 变化（邮箱被重建）
-        full_scan = (last_uid == 0 or server_uidvalidity != stored_uidvalidity)
-
-        if full_scan:
-            if server_uidvalidity != stored_uidvalidity and stored_uidvalidity is not None:
-                print(f"检测到邮箱 UIDVALIDITY 变化，执行全量扫描")
-            else:
-                print("首次运行，执行全量扫描")
-            status, uid_data = imap_client.uid('search', None, 'ALL')
-        else:
-            print(f"增量模式：拉取 UID > {last_uid} 的新邮件")
-            status, uid_data = imap_client.uid('search', None, f'UID {last_uid + 1}:*')
-
-        uid_list = uid_data[0].split()  # 每个元素是 bytes 类型的 UID
-
-        if not uid_list:
-            print("没有新邮件需要处理。")
-            save_sync_state(conn, last_uid, server_uidvalidity)
-            query_and_display_data(conn)
-            conn.close()
-            imap_client.close()
-            imap_client.logout()
-            return
-
-        # 统计信息
-        total_processed = 0
-        emails_with_attachments = 0
-        emails_without_attachments = []
-        total_data_inserted = 0
-
-        # 失败追踪
-        failed_extraction_emails = []  # 有Excel但提取失败的邮件
-        failed_insert_records = []  # 提取成功但插入失败的记录
-
-        total_emails = len(uid_list)
-        max_uid = last_uid  # 记录本次处理到的最大 UID
-        print(f"共 {total_emails} 封新邮件需要处理\n")
-
-        # 遍历每封邮件（使用 UID fetch）
-        for idx, uid in enumerate(uid_list, 1):
-            # 显示进度条
-            progress = idx / total_emails * 100
-            bar_length = 50
-            filled_length = int(bar_length * idx // total_emails)
-            bar = '█' * filled_length + '-' * (bar_length - filled_length)
-            print(f'\r进度: [{bar}] {progress:.1f}% ({idx}/{total_emails})', end='', flush=True)
-
-            try:
-                # 使用 UID fetch 获取邮件原文
-                status, email_data = imap_client.uid('fetch', uid, '(RFC822)')
-
-                # 解析邮件
-                raw_email = email_data[0][1]
-                msg = email.message_from_bytes(raw_email)
-
-                # 获取邮件基本信息
-                subject_header = msg.get("Subject")
-                subject = decode_str(subject_header) if subject_header else "(无主题)"
-
-                from_header = msg.get("From")
-                sender = decode_str(from_header) if from_header else "(未知发件人)"
-
-                date_header = msg.get("Date")
-
-                # 提取Excel附件
-                email_failed_extractions = []
-                dataframes, has_excel = extract_excel_attachments(msg, email_failed_extractions)
-
-                if dataframes:
-                    emails_with_attachments += 1
-
-                    # 将数据插入数据库
-                    for df_info in dataframes:
-                        df = df_info['data']
-                        email_failed_inserts = []
-                        source_id = insert_email_source(
-                            conn, subject, sender, date_header,
-                            df_info['filename'], df_info['sheet_name']
-                        )
-                        inserted, skipped = insert_data_to_db(conn, df, email_failed_inserts, source_id)
-                        total_data_inserted += inserted
-
-                        # 记录插入失败的记录（排除重复数据）
-                        for fail_record in email_failed_inserts:
-                            fail_record['email_subject'] = subject
-                            fail_record['email_date'] = date_header
-                            fail_record['filename'] = df_info['filename']
-                            failed_insert_records.append(fail_record)
-                            # 持久化到数据库（仅记录真正的失败，跳过重复数据）
-                            if '缺少必需字段' in fail_record.get('reason', '') or \
-                               '插入数据库失败' in fail_record.get('reason', ''):
-                                log_extraction_failure(
-                                    conn, subject, sender, date_header,
-                                    df_info['filename'], '',
-                                    fail_record.get('reason', '')
-                                )
-
-                # 记录提取失败的附件
-                if email_failed_extractions:
-                    for fail_record in email_failed_extractions:
-                        fail_record['email_subject'] = subject
-                        fail_record['email_date'] = date_header
-                        failed_extraction_emails.append(fail_record)
-                        # 持久化到数据库
-                        log_extraction_failure(
-                            conn, subject, sender, date_header,
-                            fail_record.get('filename', ''),
-                            fail_record.get('sheet_name', ''),
-                            fail_record.get('reason', '')
-                        )
-
-                # 如果有Excel但是都提取失败了
-                if has_excel and not dataframes:
-                    pass  # 已在failed_extraction_emails中记录
-                elif not has_excel:
-                    # 没有附件的邮件
-                    emails_without_attachments.append({
-                        'id': uid.decode(),
-                        'subject': subject,
-                        'sender': sender,
-                        'date': date_header
-                    })
-
-                # 更新已处理到的最大 UID
-                max_uid = max(max_uid, int(uid))
-                total_processed += 1
-
-            except Exception as e:
-                print(f"\n  [错误] 处理邮件 UID={uid.decode()} 时出错: {e}")
-                import traceback
-                traceback.print_exc()
-
-        # 完成进度显示
-        print()  # 换行
-
-        # 保存同步状态（记录本次处理到的最大 UID）
-        save_sync_state(conn, max_uid, server_uidvalidity)
-        print(f"同步状态已更新：last_uid={max_uid}")
-
-        # 增量计算复权累计净值（只处理有 NULL 行的基金）
-        if total_data_inserted > 0:
-            null_funds = conn.execute(
-                "SELECT DISTINCT fund_code FROM fund_nav_data WHERE adjusted_nav IS NULL AND fund_code IS NOT NULL"
-            ).fetchall()
-            if null_funds:
-                print(f"\n计算复权累计净值（共 {len(null_funds)} 个基金）...")
-                for (product_code,) in null_funds:
-                    compute_adjusted_nav(conn, product_code)
-                print("复权净值计算完成")
-
-        # 显示统计信息
-        print("\n" + "="*80)
-        print("处理完成!")
-        print("="*80)
-        print(f"总共处理邮件: {total_processed} 封")
-        print(f"有Excel附件: {emails_with_attachments} 封")
-        print(f"无Excel附件: {len(emails_without_attachments)} 封")
-        print(f"成功插入数据: {total_data_inserted} 条")
-
-        # 显示失败报告
-        print_failure_report(failed_extraction_emails, failed_insert_records)
-
-        # 查询并显示数据库中的所有数据
-        query_and_display_data(conn)
-
-    except Exception as e:
-        print(f"遍历邮件失败: {e}")
-        import traceback
-        traceback.print_exc()
-
-    # 步骤6: 关闭连接
-    print("\n正在关闭连接...")
-    try:
-        conn.close()
-        imap_client.close()
-        imap_client.logout()
-        print("已断开所有连接")
-    except Exception as e:
-        print(f"断开连接时出错: {e}")
+def connect_and_fetch_email(email_user, email_pwd, db_path, **kwargs):
+    """Use the same durable sync service as API and scheduler callers."""
+    from sync_service import run_email_sync
+    return run_email_sync(email_user, email_pwd, db_path, **kwargs)
 
 
 def main():
     """主函数"""
+    import argparse
+    import json
+    parser = argparse.ArgumentParser(description='增量同步基金邮件，或重试指定失败记录/邮件 UID')
+    parser.add_argument('--db', help='数据库文件路径（默认读取 DB_PATH）')
+    retry = parser.add_mutually_exclusive_group()
+    retry.add_argument('--retry-failure', type=int, help='重试失败记录 ID')
+    retry.add_argument('--retry-uid', type=int, help='重试当前收件箱中的单个邮件 UID')
+    args = parser.parse_args()
     print("163邮箱基金净值数据采集程序（智能版）")
     print("="*60)
     print("功能说明:")
@@ -1035,7 +522,7 @@ def main():
     load_dotenv()
 
     # SQLite 数据库路径（默认 fund_data.db）
-    db_path = os.getenv('DB_PATH', 'fund_data.db')
+    db_path = args.db or os.getenv('DB_PATH', 'fund_data.db')
 
     # 163邮箱登录信息
     email_user = os.getenv('EMAIL_USER', '')
@@ -1043,13 +530,15 @@ def main():
 
     if not email_user or not email_pwd:
         print("错误: 环境变量 EMAIL_USER 和 EMAIL_PASSWORD 不能为空，请检查 .env 文件！")
-        return
+        raise SystemExit(1)
 
     if "@163.com" not in email_user:
         print("警告: 邮箱地址似乎不是163邮箱")
 
     # 连接并获取邮件
-    connect_and_fetch_email(email_user, email_pwd, db_path)
+    result = connect_and_fetch_email(email_user, email_pwd, db_path, trigger='cli',
+                                    retry_failure_id=args.retry_failure, retry_uid=args.retry_uid)
+    print(json.dumps(result, ensure_ascii=False))
 
 
 if __name__ == "__main__":

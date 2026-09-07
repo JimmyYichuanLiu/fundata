@@ -52,7 +52,7 @@ function bestIdx(vals, invertGood) {
 export default function ComparisonMetrics({
   compareList, navDataMap, benchItems, benchmarkCode,
 }) {
-  const [period, setPeriod]           = useState(365)
+  const period = 0
   const [excessMode, setExcessMode]   = useState(false)
   // fund_id of fund used as benchmark, null = use index benchmark
   const [baseFundId, setBaseFundId]   = useState(null)
@@ -111,21 +111,11 @@ export default function ComparisonMetrics({
     : benchLabel
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 comparison-metrics">
       {/* Controls */}
       <div className="bg-white rounded-xl shadow p-4 flex flex-wrap items-center gap-3">
         <span className="text-xs text-gray-500">统计区间:</span>
-        {PERIOD_OPTIONS.map(opt => (
-          <button
-            key={opt.days}
-            onClick={() => setPeriod(opt.days)}
-            className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-              period === opt.days ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-            }`}
-          >
-            {opt.label}
-          </button>
-        ))}
+        <span className="badge">与顶部所选区间一致</span>
         <label className="ml-auto flex items-center gap-1.5 cursor-pointer select-none text-xs text-gray-600">
           <input
             type="checkbox"

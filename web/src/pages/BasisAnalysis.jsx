@@ -74,6 +74,8 @@ const CONTRACT_COLORS = {
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function BasisAnalysis() {
+  const [error, setError] = useState('')
+  const [revision, setRevision] = useState(0)
   const [activeSymbol, setActiveSymbol] = useState('IF')
   const [basisItems, setBasisItems] = useState([])
   const [loading, setLoading] = useState(false)
@@ -106,6 +108,7 @@ export default function BasisAnalysis() {
   useEffect(() => {
     const controller = new AbortController()
     setTodayLoading(true)
+    setError('')
     setTodayData(null)
     fetchBasisToday(activeSymbol, controller.signal)
       .then(data => {
@@ -113,10 +116,10 @@ export default function BasisAnalysis() {
         setTodayLoading(false)
       })
       .catch(err => {
-        if (err.name !== 'AbortError') setTodayLoading(false)
+        if (err.name !== 'AbortError') { setTodayLoading(false); setError('基差快照读取失败：' + err.message) }
       })
     return () => controller.abort()
-  }, [activeSymbol])
+  }, [activeSymbol, revision])
 
   // Fetch quarterly basis history when symbol or date range changes
   useEffect(() => {
@@ -129,10 +132,10 @@ export default function BasisAnalysis() {
         setLoading(false)
       })
       .catch(err => {
-        if (err.name !== 'AbortError') setLoading(false)
+        if (err.name !== 'AbortError') { setLoading(false); setError('基差历史读取失败：' + err.message) }
       })
     return () => controller.abort()
-  }, [activeSymbol, dateParams])
+  }, [activeSymbol, dateParams, revision])
 
   // Split into 当季 / 下季 series
   const { currentSeries, nextSeries } = useMemo(() => {
@@ -252,7 +255,7 @@ export default function BasisAnalysis() {
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-gray-50 basis-page">
       {/* Header */}
       <header className="bg-white border-b border-gray-200 sticky top-14 lg:top-0 z-10">
         <div className="max-w-6xl mx-auto px-4 py-4 flex flex-wrap items-center gap-4">
@@ -266,7 +269,7 @@ export default function BasisAnalysis() {
         </div>
       </header>
 
-      <main className="max-w-6xl mx-auto px-4 py-6 space-y-6">
+      <main className="max-w-6xl mx-auto px-4 py-6 space-y-6"><div className="page-heading"><div><div className="eyebrow">BASIS / 期现研究</div><h2 className="text-2xl font-bold">观察期现结构与期限差异</h2><p>对照现货指数、交割期限与历史区间，理解年化基差的变化。</p></div></div>
 
         {/* Symbol tabs */}
         <div className="flex gap-2 flex-wrap">
@@ -285,6 +288,7 @@ export default function BasisAnalysis() {
           ))}
         </div>
 
+        {error && <div className="notice notice-error" role="alert">{error} <button className="button-secondary" onClick={() => setRevision(v => v + 1)}>重试</button></div>}
         {/* Date range controls */}
         <div className="flex flex-wrap items-center gap-2">
           {RANGE_OPTIONS.map((opt, idx) => (

@@ -1,3 +1,4 @@
+import Icon from '../components/Icon.jsx'
 import { useState, useEffect, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import { fetchCrudeDaily, daysAgoYYYYMMDD } from '../api/crudeApi.js'
@@ -54,7 +55,7 @@ export default function CrudeDataTable() {
           to="/crude"
           className="flex items-center gap-1 text-sm text-slate-500 hover:text-primary transition-colors"
         >
-          <span className="material-symbols-outlined text-base">arrow_back</span>
+          <Icon className="text-base">arrow_back</Icon>
           返回原油
         </Link>
         <h1 className="text-xl font-bold">近30交易日原油数据</h1>
@@ -62,7 +63,7 @@ export default function CrudeDataTable() {
 
       {loading && (
         <div className="flex items-center gap-2 text-slate-400 text-sm">
-          <span className="material-symbols-outlined animate-spin text-base">progress_activity</span>
+          <Icon className="animate-spin text-base">progress_activity</Icon>
           加载中…
         </div>
       )}

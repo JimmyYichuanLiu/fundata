@@ -12,17 +12,17 @@ ChartJS.register(RadialLinearScale, PointElement, LineElement, Filler, Tooltip, 
 const LABELS = ['年化收益', '夏普比率', '抗回撤', '低波动', '月胜率', '卡玛比率']
 
 function normalize(val, min, max) {
-  if (val == null) return 0
+  if (val == null || !Number.isFinite(val)) return null
   return Math.max(0, Math.min(100, ((Math.max(min, Math.min(max, val)) - min) / (max - min)) * 100))
 }
 
 function getRadarValues(m) {
-  if (!m) return [0, 0, 0, 0, 0, 0]
+  if (!m) return [null, null, null, null, null, null]
   return [
     normalize(m.annualizedReturn,       -50,  100),
     normalize(m.sharpe,                  -2,    5),
-    normalize(-Math.abs(m.maxDrawdown || 0), -50, 0),
-    normalize(-(m.annualizedVol || 0),  -80,    0),
+    normalize(m.maxDrawdown == null ? null : -Math.abs(m.maxDrawdown), -50, 0),
+    normalize(m.annualizedVol == null ? null : -m.annualizedVol, -80, 0),
     normalize(m.monthlyWinRate,           0,  100),
     normalize(m.calmar,                  -2,   10),
   ]

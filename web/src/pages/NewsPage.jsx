@@ -1,3 +1,4 @@
+import Icon from '../components/Icon.jsx'
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { fetchCrudeNews, triggerNewsSync, fetchNewsSyncStatus } from '../api/crudeApi.js'
@@ -158,7 +159,7 @@ export default function NewsPage() {
             to="/crude"
             className="flex items-center gap-1 text-sm text-slate-500 hover:text-primary transition-colors"
           >
-            <span className="material-symbols-outlined text-base">arrow_back</span>
+            <Icon className="text-base">arrow_back</Icon>
             原油
           </Link>
           <h1 className="text-xl font-bold">全部新闻</h1>
@@ -195,7 +196,7 @@ export default function NewsPage() {
 
       {/* 搜索框 */}
       <div className="relative">
-        <span className="absolute left-3 top-1/2 -translate-y-1/2 material-symbols-outlined text-slate-400 text-lg">search</span>
+        <Icon className="absolute left-3 top-1/2 -translate-y-1/2  text-slate-400 text-lg">search</Icon>
         <input
           type="text"
           value={inputVal}
@@ -208,7 +209,7 @@ export default function NewsPage() {
             onClick={clearSearch}
             className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
           >
-            <span className="material-symbols-outlined text-lg">close</span>
+            <Icon className="text-lg">close</Icon>
           </button>
         )}
       </div>
@@ -259,14 +260,14 @@ export default function NewsPage() {
       <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm divide-y divide-slate-100 dark:divide-slate-800">
         {loading && (
           <div className="flex items-center justify-center h-32 text-slate-400 text-sm gap-2">
-            <span className="material-symbols-outlined animate-spin text-lg">progress_activity</span>
+            <Icon className="animate-spin text-lg">progress_activity</Icon>
             加载中…
           </div>
         )}
 
         {!loading && items.length === 0 && (
           <div className="flex flex-col items-center justify-center h-32 text-slate-400 text-sm gap-2">
-            <span className="material-symbols-outlined text-3xl">newspaper</span>
+            <Icon className="text-3xl">newspaper</Icon>
             <span>{query ? `未找到包含「${query}」的新闻` : '暂无新闻，请点击「抓取新闻」'}</span>
           </div>
         )}

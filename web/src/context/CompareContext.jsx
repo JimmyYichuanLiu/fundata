@@ -26,7 +26,7 @@ export function CompareProvider({ children }) {
   }, [compareList])
 
   return (
-    <CompareContext.Provider value={{ compareList, toggle, remove, clear, isSelected }}>
+    <CompareContext.Provider value={{ compareList, toggle, remove, clear, isSelected, setSelection: setCompareList }}>
       {children}
     </CompareContext.Provider>
   )

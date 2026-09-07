@@ -223,7 +223,8 @@ def client(seed_ids):
             conn.close()
 
     app.dependency_overrides[get_db] = _override_get_db
-    with TestClient(app, raise_server_exceptions=False) as c:
+    from tests.api_test_support import authenticated_client
+    with authenticated_client(app, db_path) as c:
         yield c
     app.dependency_overrides.clear()
 

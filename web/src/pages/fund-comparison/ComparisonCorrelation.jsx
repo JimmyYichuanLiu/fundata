@@ -9,7 +9,7 @@ function computeCorrelationMatrix(navDataMap, compareList, benchItems, benchmark
     for (let i = 1; i < items.length; i++) {
       const prev = items[i - 1].unit_nav
       const curr = items[i].unit_nav
-      if (prev > 0) rets.push({ date: items[i].nav_date, r: (curr - prev) / prev })
+      if (Number.isFinite(prev) && Number.isFinite(curr) && prev > 0) rets.push({ date: items[i].nav_date, r: (curr - prev) / prev })
     }
     return { id: f.fund_id, name: f.product_name, rets }
   })

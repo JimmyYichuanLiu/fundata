@@ -1,7 +1,47 @@
 const API = ''
+let csrfToken = ''
+export async function apiRequest(path, options = {}) {
+  const headers = { ...options.headers }
+  if (csrfToken && options.method && !['GET', 'HEAD'].includes(options.method)) headers['X-CSRF-Token'] = csrfToken
+  return fetch(path, { ...options, headers, credentials: 'same-origin' })
+}
+export async function authSession() {
+  const data = await apiFetch('/api/auth/session')
+  csrfToken = data.csrf_token || ''
+  return data
+}
+export async function authLogin(username, password) {
+  const response = await apiRequest('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }) })
+  const data = await response.json()
+  if (!response.ok) throw new Error(data.detail || '登录失败')
+  csrfToken = data.csrf_token || ''
+  return data
+}
+export async function authLogout() {
+  const response = await apiRequest('/api/auth/logout', { method: 'POST' })
+  if (!response.ok) throw new Error('退出失败，请重试')
+  csrfToken = ''
+  return authSession()
+}
+export async function fetchPortfolios(signal) { return apiFetch('/api/portfolios', signal) }
+export async function fetchSyncHistory(signal) { return apiFetch('/api/sync/history', signal) }
+export async function retryFailure(id) {
+  const response = await apiRequest('/api/failures/' + id + '/retry', { method: 'POST' })
+  const data = await response.json()
+  if (!response.ok) throw new Error(data.detail || '重试失败')
+  return data
+}
+export async function downloadEmailExport() {
+  const response = await apiRequest('/api/export/email.xlsx')
+  if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.detail || '导出失败，请重试') }
+  const url = URL.createObjectURL(await response.blob())
+  const link = document.createElement('a')
+  link.href = url; link.download = 'fund_email_nav.xlsx'; document.body.appendChild(link); link.click(); link.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
 
 async function apiFetch(path, signal) {
-  const res = await fetch(`${API}${path}`, signal ? { signal } : {})
+  const res = await apiRequest(`${API}${path}`, signal ? { signal } : {})
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
     throw new Error(body.detail || `HTTP ${res.status}`)
@@ -15,6 +55,7 @@ export async function fetchStats(signal) {
 
 export async function fetchFunds(signal, opts = {}) {
   const params = new URLSearchParams()
+  if (opts.source) params.set('source', opts.source)
   if (opts.strategy_l1) params.set('strategy_l1', opts.strategy_l1)
   if (opts.strategy_l2) params.set('strategy_l2', opts.strategy_l2)
   const qs = params.toString()
@@ -50,7 +91,7 @@ export async function fetchSyncStatus(signal) {
 }
 
 export async function triggerSync() {
-  const res = await fetch('/api/sync/trigger', { method: 'POST' })
+  const res = await apiRequest('/api/sync/trigger', { method: 'POST' })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return res.json()
 }
@@ -68,7 +109,7 @@ export async function fetchFailures(signal) {
 }
 
 export async function createNav(data) {
-  const res = await fetch('/api/nav', {
+  const res = await apiRequest('/api/nav', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
@@ -81,8 +122,14 @@ export async function createNav(data) {
 }
 
 export async function deleteNav(navId) {
-  const res = await fetch(`/api/nav/${navId}`, { method: 'DELETE' })
+  const res = await apiRequest(`/api/nav/${navId}`, { method: 'DELETE' })
   if (!res.ok && res.status !== 204) throw new Error(`HTTP ${res.status}`)
+}
+export async function updateNav(navId, data) {
+  const response = await apiRequest(`/api/nav/${navId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) })
+  const body = await response.json().catch(() => ({}))
+  if (!response.ok) throw new Error(body.detail || '净值保存失败')
+  return body
 }
 
 export async function fetchMarketIndices(signal) {
@@ -122,7 +169,7 @@ export async function fetchMarketSyncStatus(signal) {
 }
 
 export async function triggerMarketSync() {
-  const res = await fetch('/api/market/sync/trigger', { method: 'POST' })
+  const res = await apiRequest('/api/market/sync/trigger', { method: 'POST' })
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
     throw new Error(body.detail || `HTTP ${res.status}`)
@@ -139,7 +186,7 @@ export async function fetchRealtimeFutures(signal) {
 }
 
 export async function triggerRealtimeSync() {
-  const res = await fetch('/api/market/realtime/trigger', { method: 'POST' })
+  const res = await apiRequest('/api/market/realtime/trigger', { method: 'POST' })
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
     throw new Error(body.detail || `HTTP ${res.status}`)
@@ -169,7 +216,7 @@ export async function fetchBasisToday(symbol, signal) {
 }
 
 export async function setFundStrategy(fundId, strategyL1, strategyL2) {
-  const res = await fetch(`/api/funds/${fundId}/strategy`, {
+  const res = await apiRequest(`/api/funds/${fundId}/strategy`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ strategy_l1: strategyL1 || null, strategy_l2: strategyL2 || null }),
@@ -205,7 +252,7 @@ export async function fetchFundMetrics(opts = {}, signal) {
 }
 
 export async function createPortfolio(payload) {
-  const res = await fetch('/api/portfolios', {
+  const res = await apiRequest('/api/portfolios', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -218,7 +265,7 @@ export async function createPortfolio(payload) {
 }
 
 export async function calculatePortfolio(id) {
-  const res = await fetch(`/api/portfolios/${id}/calculate`, { method: 'POST' })
+  const res = await apiRequest(`/api/portfolios/${id}/calculate`, { method: 'POST' })
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
     throw new Error(body.detail || `HTTP ${res.status}`)
@@ -239,7 +286,7 @@ export async function fetchPortfolioMetrics(id, signal) {
 }
 
 export async function setFundBenchmark(fundId, benchmarkIndex) {
-  const res = await fetch(`/api/funds/${fundId}/benchmark`, {
+  const res = await apiRequest(`/api/funds/${fundId}/benchmark`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ benchmark_index: benchmarkIndex }),

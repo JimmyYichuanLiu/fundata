@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useCompare } from '../context/CompareContext.jsx'
-import { fetchFundNav, fetchIndexDaily } from '../api.js'
+import { fetchFundNav, fetchIndexDaily, fetchFunds } from '../api.js'
 import { BENCHMARK_OPTIONS, FUND_COLORS } from '../utils/metricDefs.js'
 import ComparisonHero from './fund-comparison/ComparisonHero.jsx'
 import ComparisonChart from './fund-comparison/ComparisonChart.jsx'
@@ -9,6 +9,9 @@ import ComparisonMetrics from './fund-comparison/ComparisonMetrics.jsx'
 import ComparisonCorrelation from './fund-comparison/ComparisonCorrelation.jsx'
 import ComparisonRadar from './fund-comparison/ComparisonRadar.jsx'
 
+import FundPicker from '../components/FundPicker.jsx'
+import PageState from '../components/PageState.jsx'
+import { parseFundIds, fundSelectionSearch } from '../utils/selection.js'
 const SECTIONS = [
   { key: 'chart',       label: '业绩走势' },
   { key: 'metrics',     label: '业绩指标' },
@@ -18,11 +21,37 @@ const SECTIONS = [
 
 export default function ComparisonPage() {
   const navigate = useNavigate()
-  const { compareList, remove, clear } = useCompare()
+  const { compareList, remove, clear, toggle, setSelection } = useCompare()
+  const [, setParams] = useSearchParams()
+  const [funds, setFunds] = useState([])
+  const [ready, setReady] = useState(false)
+  const [error, setError] = useState('')
+  const [from, setFrom] = useState('')
+  const [to, setTo] = useState('')
+  const [navType, setNavType] = useState('unit_nav')
+  const [revision, setRevision] = useState(0)
 
   useEffect(() => {
-    if (compareList.length < 2) navigate('/')
-  }, [compareList, navigate])
+    const controller = new AbortController()
+    fetchFunds(controller.signal).then(rows => {
+      setFunds(rows)
+      const ids = parseFundIds(window.location.search)
+      if (ids.length) setSelection(ids.map(id => rows.find(f => f.fund_id === id)).filter(Boolean))
+      setReady(true)
+    }).catch(err => { if (err.name !== 'AbortError') setError(err.message) })
+    return () => controller.abort()
+  }, [revision])
+  useEffect(() => {
+    if (ready) setParams(fundSelectionSearch(compareList), { replace: true })
+  }, [compareList, ready, setParams])
+  useEffect(() => {
+    const restore = () => {
+      const ids = parseFundIds(window.location.search)
+      setSelection(ids.map(id => funds.find(f => f.fund_id === id)).filter(Boolean))
+    }
+    window.addEventListener('popstate', restore)
+    return () => window.removeEventListener('popstate', restore)
+  }, [funds, setSelection])
 
   const [benchmarkCode, setBenchmarkCode] = useState('000852.SH')
   const [navDataMap, setNavDataMap]       = useState({})
@@ -30,23 +59,17 @@ export default function ComparisonPage() {
   const [loading, setLoading]             = useState(true)
   const [activeSection, setActiveSection] = useState('chart')
 
-  // ── Load all fund NAVs ──
   useEffect(() => {
-    if (compareList.length === 0) return
-    setLoading(true)
-    Promise.all(
-      compareList.map(f =>
-        fetchFundNav(f.fund_id, { limit: 5000, apply_filter: false })
-          .then(items => ({ fund_id: f.fund_id, items }))
-          .catch(() => ({ fund_id: f.fund_id, items: [] }))
-      )
-    ).then(results => {
-      const map = {}
-      results.forEach(r => { map[r.fund_id] = r.items })
-      setNavDataMap(map)
-      setLoading(false)
-    })
-  }, [compareList])
+    if (!ready || compareList.length === 0) { setLoading(false); setNavDataMap({}); return }
+    const controller = new AbortController()
+    setLoading(true); setError('')
+    Promise.all(compareList.map(f => fetchFundNav(f.fund_id, { limit: 5000, apply_filter: true }, controller.signal).then(items => ({ fund_id: f.fund_id, items }))))
+      .then(results => setNavDataMap(Object.fromEntries(results.map(r => [r.fund_id, r.items]))))
+      .catch(err => { if (err.name !== 'AbortError') setError(err.message) })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false) })
+    return () => controller.abort()
+  }, [compareList, ready, revision])
+  const displayMap = useMemo(() => Object.fromEntries(Object.entries(navDataMap).map(([id, items]) => [id, items.filter(item => (!from || item.nav_date >= from) && (!to || item.nav_date <= to)).map(item => ({ ...item, unit_nav: Number.isFinite(item[navType]) && item[navType] > 0 ? item[navType] : null }))])), [navDataMap, from, to, navType])
 
   // ── commonStart: latest of all funds' first dates (公共区间起点) ──
   const commonStart = useMemo(() => {
@@ -68,6 +91,32 @@ export default function ComparisonPage() {
     }
   }, [navDataMap])
 
+  useEffect(() => {
+    if (!Object.keys(navDataMap).length || from || to) return
+    const lists = Object.values(navDataMap).filter(items => items.length)
+    if (lists.length) {
+      const commonFrom = lists.map(items => items[0].nav_date).sort().at(-1)
+      const commonTo = lists.map(items => items.at(-1).nav_date).sort()[0]
+      setFrom(commonFrom <= commonTo ? commonFrom : dateRange.from)
+      setTo(commonFrom <= commonTo ? commonTo : dateRange.to)
+    }
+  }, [navDataMap, from, to, dateRange])
+  const noCommonRange = useMemo(() => {
+    const lists = Object.values(navDataMap).filter(items => items.length)
+    return lists.length > 1 && lists.map(items => items[0].nav_date).sort().at(-1) > lists.map(items => items.at(-1).nav_date).sort()[0]
+  }, [navDataMap])
+  const setWindow = days => {
+    if (!dateRange.to) return
+    setTo(dateRange.to)
+    if (!days) { setFrom(dateRange.from); return }
+    const date = new Date(dateRange.to + 'T00:00:00Z')
+    date.setUTCDate(date.getUTCDate() - days)
+    setFrom(date.toISOString().slice(0, 10))
+  }
+  const visibleBench = useMemo(() => benchItems.filter(item => {
+    const date = String(item.trade_date).replaceAll('-', '')
+    return (!from || date >= from.replaceAll('-', '')) && (!to || date <= to.replaceAll('-', ''))
+  }), [benchItems, from, to])
   // ── Load benchmark ──
   useEffect(() => {
     if (!benchmarkCode || !dateRange.from) { setBenchItems([]); return }
@@ -105,10 +154,10 @@ export default function ComparisonPage() {
     window.scrollTo({ top: el.getBoundingClientRect().top + window.scrollY - 120, behavior: 'smooth' })
   }, [])
 
-  if (compareList.length < 2) return null
+  if (!ready && error) return <PageState error={error} onRetry={() => setRevision(v => v + 1)} />
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen">
       {/* Header */}
       <header className="bg-white border-b border-gray-200 sticky top-14 lg:top-0 z-10">
         <div className="max-w-6xl mx-auto px-4 py-4 flex items-center gap-4">
@@ -123,10 +172,19 @@ export default function ComparisonPage() {
       </header>
 
       <main className="max-w-6xl mx-auto px-4 py-6 space-y-4">
+        <div><div className="eyebrow">COMPARE / 多维基金研究</div><h2 className="text-2xl font-bold mb-3">同一视角，看见表现差异</h2><p className="text-xs text-slate-500 mb-5">选择最多八只基金。选择项保存在网址中，可直接分享或刷新继续研究。</p><FundPicker funds={funds} selectedIds={compareList.map(f => f.fund_id)} onToggle={toggle} /></div>
+        <div className="toolbar panel"><label className="text-xs">起始日期 <input className="control" aria-label="对比起始日期" type="date" value={from} onChange={e => setFrom(e.target.value)} /></label><label className="text-xs">截止日期 <input className="control" aria-label="对比截止日期" type="date" value={to} onChange={e => setTo(e.target.value)} /></label><select className="control" aria-label="净值类型" value={navType} onChange={e => setNavType(e.target.value)}><option value="unit_nav">单位净值</option><option value="accumulated_nav">累计净值</option><option value="adj_nav">复权净值</option></select></div>
+        <div className="flex flex-wrap gap-2">{[[30, '近一月'], [90, '近三月'], [365, '近一年'], [0, '全部区间']].map(([days, label]) => <button className="button-secondary" key={days} onClick={() => setWindow(days)}>{label}</button>)}</div>
+        {!loading && compareList.length > 1 && Object.values(displayMap).some(items => !items.length || items.some(item => item.unit_nav == null)) && <div className="notice">部分基金在所选区间或净值类型下存在缺失记录。图表保留缺口，指标只使用有效观测值。</div>}
+        {error && <PageState error={error} onRetry={() => setRevision(v => v + 1)} />}
+        {compareList.length < 2 && <PageState title="开始一次基金对比">请在上方选择至少两只基金。</PageState>}
+        {noCommonRange && <div className="notice" role="status">所选基金没有公共净值区间。可减少基金，或选择“全部区间”查看各自历史；各基金起点不同，相关性与共同区间指标可能缺失。</div>}
+        {from && to && from > to && <div className="notice notice-error" role="alert">起始日期不能晚于截止日期。</div>}
+        {compareList.length >= 2 && <>
         {/* Hero */}
         <ComparisonHero
           compareList={compareList}
-          navDataMap={navDataMap}
+          navDataMap={displayMap}
           loading={loading}
           onRemove={remove}
         />
@@ -167,11 +225,11 @@ export default function ComparisonPage() {
         <div id="cmp-section-chart">
           <ComparisonChart
             compareList={compareList}
-            navDataMap={navDataMap}
-            benchItems={benchItems}
+            navDataMap={displayMap}
+            benchItems={visibleBench}
             benchmarkCode={benchmarkCode}
             loading={loading}
-            commonStart={commonStart}
+            commonStart={from}
           />
         </div>
 
@@ -179,8 +237,8 @@ export default function ComparisonPage() {
         <div id="cmp-section-metrics">
           <ComparisonMetrics
             compareList={compareList}
-            navDataMap={navDataMap}
-            benchItems={benchItems}
+            navDataMap={displayMap}
+            benchItems={visibleBench}
             benchmarkCode={benchmarkCode}
           />
         </div>
@@ -189,8 +247,8 @@ export default function ComparisonPage() {
         <div id="cmp-section-correlation">
           <ComparisonCorrelation
             compareList={compareList}
-            navDataMap={navDataMap}
-            benchItems={benchItems}
+            navDataMap={displayMap}
+            benchItems={visibleBench}
             benchmarkCode={benchmarkCode}
           />
         </div>
@@ -199,10 +257,11 @@ export default function ComparisonPage() {
         <div id="cmp-section-performance">
           <ComparisonRadar
             compareList={compareList}
-            navDataMap={navDataMap}
+            navDataMap={displayMap}
             commonStart={commonStart}
           />
         </div>
+        </>}
       </main>
     </div>
   )

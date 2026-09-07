@@ -1,3 +1,5 @@
+import { useAuth } from '../context/AuthContext.jsx'
+import PageState from '../components/PageState.jsx'
 import { useEffect, useState, useMemo, useRef, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
@@ -72,12 +74,15 @@ function normalizeToBase(items, key = 'portfolio_nav') {
 }
 
 export default function PortfolioDetailPage() {
+  const { canManage } = useAuth()
+  const [error, setError] = useState('')
   const { id } = useParams()
   const navigate = useNavigate()
   const chartRef = useRef(null)
 
   const [portfolio, setPortfolio] = useState(null)
   const [navItems, setNavItems] = useState([])
+  const [staleReason, setStaleReason] = useState('')
   const [metrics, setMetrics] = useState(null)
   const [loading, setLoading] = useState(true)
   const [recalculating, setRecalculating] = useState(false)
@@ -92,12 +97,15 @@ export default function PortfolioDetailPage() {
 
   const load = useCallback(() => {
     setLoading(true)
+    setError('')
     Promise.all([fetchPortfolio(id), fetchPortfolioNav(id), fetchPortfolioMetrics(id)])
       .then(([p, n, m]) => {
         setPortfolio(p)
         setNavItems(n.items || [])
+        setStaleReason(n.stale ? n.reason || '底层净值已变化，需要管理员重新计算组合。' : '')
         setMetrics(m)
       })
+      .catch(err => setError(err.message))
       .finally(() => setLoading(false))
   }, [id])
 
@@ -258,6 +266,8 @@ export default function PortfolioDetailPage() {
     try {
       await calculatePortfolio(id)
       load()
+    } catch (err) {
+      setError(err.message)
     } finally {
       setRecalculating(false)
     }
@@ -272,6 +282,8 @@ export default function PortfolioDetailPage() {
       </div>
     )
   }
+
+  if (error) return <PageState error={error} onRetry={load} />
 
   if (!portfolio) {
     return <div className="p-8 text-gray-400">组合不存在</div>
@@ -291,6 +303,7 @@ export default function PortfolioDetailPage() {
           </p>
         </div>
         <button
+          hidden={!canManage}
           onClick={handleRecalculate}
           disabled={recalculating}
           className="px-3 py-1.5 text-xs rounded-lg border border-blue-200 text-blue-600 hover:bg-blue-50 disabled:opacity-50 whitespace-nowrap"
@@ -299,6 +312,7 @@ export default function PortfolioDetailPage() {
         </button>
       </div>
 
+      {staleReason && <div className="notice" role="status">{staleReason}</div>}
       {/* Summary metric cards */}
       {fundMetrics && (
         <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
@@ -364,7 +378,7 @@ export default function PortfolioDetailPage() {
 
         <div className="h-72">
           {filteredItems.length === 0
-            ? <div className="h-full flex items-center justify-center text-gray-400 text-sm">暂无净值数据，请先点击「重新计算」</div>
+            ? <div className="h-full flex items-center justify-center text-gray-400 text-sm">暂无有效组合净值。需要管理员检查成分区间并重新计算。</div>
             : <Line ref={chartRef} data={chartData} options={chartOptions} />
           }
         </div>

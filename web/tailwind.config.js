@@ -8,12 +8,12 @@ export default {
   theme: {
     extend: {
       colors: {
-        primary: '#4F46E5',
+        primary: '#254A78',
         'background-light': '#F8FAFC',
         'background-dark': '#0F172A',
       },
       fontFamily: {
-        sans: ['Inter', 'system-ui', 'sans-serif'],
+        sans: ['Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'system-ui', 'sans-serif'],
       },
     },
   },
